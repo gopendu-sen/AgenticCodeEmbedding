@@ -213,6 +213,47 @@ class ChatStoreDiscoveryConfig(BaseModel):
         return self
 
 
+class ChatAPIConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    host: str
+    port: int
+    cors_allowed_origins: List[str]
+
+    @model_validator(mode="after")
+    def _validate_api(self):
+        if not self.host.strip():
+            raise ValueError("chat.api.host must be a non-empty string")
+        if self.port < 1 or self.port > 65535:
+            raise ValueError("chat.api.port must be in range 1..65535")
+        if not self.cors_allowed_origins:
+            raise ValueError("chat.api.cors_allowed_origins must contain at least one origin")
+        return self
+
+
+class ChatMemoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sqlite_path: str
+    max_history_messages: int
+    enable_summarisation: bool
+    enable_intent_tracking: bool
+    summarise_prompt: str
+    intent_prompt: str
+
+    @model_validator(mode="after")
+    def _validate_memory(self):
+        if not self.sqlite_path.strip():
+            raise ValueError("chat.memory.sqlite_path must be a non-empty string")
+        if self.max_history_messages < 1:
+            raise ValueError("chat.memory.max_history_messages must be >= 1")
+        if not self.summarise_prompt.strip():
+            raise ValueError("chat.memory.summarise_prompt must be a non-empty string")
+        if not self.intent_prompt.strip():
+            raise ValueError("chat.memory.intent_prompt must be a non-empty string")
+        return self
+
+
 class ChatConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -223,6 +264,8 @@ class ChatConfig(BaseModel):
     spinner_text: str
     system_prompt: str
     history_messages: int
+    api: ChatAPIConfig
+    memory: ChatMemoryConfig
     retrieval: ChatRetrievalConfig
     store_discovery: ChatStoreDiscoveryConfig
     max_context_chunks: int
@@ -230,12 +273,58 @@ class ChatConfig(BaseModel):
     temperature: float
     show_sources: bool
 
+    @model_validator(mode="after")
+    def _validate_chat(self):
+        if self.history_messages < 1:
+            raise ValueError("chat.history_messages must be >= 1")
+        if self.max_context_chunks < 1:
+            raise ValueError("chat.max_context_chunks must be >= 1")
+        if self.max_context_chars < 1:
+            raise ValueError("chat.max_context_chars must be >= 1")
+        return self
+
 
 class LoggingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     level: str
     embedding_verbose_per_node: bool
+
+
+class EvaluationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rules_json_path: str
+    jobs_dir: str
+    reports_dir: str
+    log_jsonl_path: str
+    evidence_per_item: int
+    max_candidates_per_item: int
+    max_snippet_chars: int
+    llm_timeout_s: int
+    html_title: str
+
+    @model_validator(mode="after")
+    def _validate_evaluation(self):
+        if not self.rules_json_path.strip():
+            raise ValueError("evaluation.rules_json_path must be a non-empty string")
+        if not self.jobs_dir.strip():
+            raise ValueError("evaluation.jobs_dir must be a non-empty string")
+        if not self.reports_dir.strip():
+            raise ValueError("evaluation.reports_dir must be a non-empty string")
+        if not self.log_jsonl_path.strip():
+            raise ValueError("evaluation.log_jsonl_path must be a non-empty string")
+        if self.evidence_per_item < 1:
+            raise ValueError("evaluation.evidence_per_item must be >= 1")
+        if self.max_candidates_per_item < 1:
+            raise ValueError("evaluation.max_candidates_per_item must be >= 1")
+        if self.max_snippet_chars < 1:
+            raise ValueError("evaluation.max_snippet_chars must be >= 1")
+        if self.llm_timeout_s < 1:
+            raise ValueError("evaluation.llm_timeout_s must be >= 1")
+        if not self.html_title.strip():
+            raise ValueError("evaluation.html_title must be a non-empty string")
+        return self
 
 
 class AgenticRagConfig(BaseModel):
@@ -251,6 +340,7 @@ class AgenticRagConfig(BaseModel):
     parser: ParserConfig
     security_tagging: SecurityTaggingConfig
     logging: LoggingConfig
+    evaluation: EvaluationConfig
     chat: ChatConfig
 
     @model_validator(mode="after")

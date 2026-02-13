@@ -1,0 +1,323 @@
+{
+  "version": 1,
+  "updated_at_utc": "2026-02-13T00:00:00Z",
+  "items": [
+    {
+      "id": "A",
+      "title": "View / Retrieve PII or Confidential+ Account Information",
+      "definition": "Reads and returns customer/account data containing PII or Confidential+ classification.",
+      "strong_signals": [
+        "GET endpoint returning customer/account/profile objects",
+        "Service method getAccountDetails",
+        "Service method retrieveCustomerProfile",
+        "SQL SELECT from customer/account tables",
+        "Response DTO fields name address dob sin ssn email phone",
+        "Controller to service to dao to select to response dto chain"
+      ],
+      "weak_signals": [
+        "mentions of pii",
+        "mentions of confidential",
+        "masking utility",
+        "redaction utility",
+        "audit log referencing customer read"
+      ],
+      "false_positives": [
+        "dummy sample data only",
+        "logging reference with no retrieval path",
+        "test mocks only"
+      ]
+    },
+    {
+      "id": "B",
+      "title": "Modify PII / Confidential+ Account Information",
+      "definition": "Updates PII or confidential account/customer attributes.",
+      "strong_signals": [
+        "POST PUT PATCH endpoint updating profile account",
+        "SQL UPDATE customer account",
+        "ORM save update on customer entity",
+        "audit event profile updated",
+        "write path chain present"
+      ],
+      "weak_signals": [
+        "validation for email phone only",
+        "update dto without persistence call"
+      ],
+      "false_positives": [
+        "ui form without backend write",
+        "logging only changes"
+      ]
+    },
+    {
+      "id": "C",
+      "title": "Electronic Documents / Disclosures with Confidential+ PII (incl. e-sign)",
+      "definition": "Generate/send/register electronic documents containing PII, including e-sign flows.",
+      "strong_signals": [
+        "DocumentService",
+        "DisclosureService",
+        "DocuSign integration",
+        "Adobe sign integration",
+        "create envelope request signature",
+        "secure document delivery module",
+        "document metadata with customer account id"
+      ],
+      "weak_signals": [
+        "static pdf template",
+        "download pdf ui reference"
+      ],
+      "false_positives": [
+        "marketing document generation without pii",
+        "template only repository"
+      ]
+    },
+    {
+      "id": "D",
+      "title": "Modify Authentication / Security Profile (incl. card issue)",
+      "definition": "Change authentication factors or security configuration.",
+      "strong_signals": [
+        "password reset endpoint",
+        "pin reset endpoint",
+        "mfa enrollment removal",
+        "unlock account",
+        "reissue debit card",
+        "identity provider or iam call"
+      ],
+      "weak_signals": [
+        "login endpoint only",
+        "password validation helper"
+      ],
+      "false_positives": [
+        "authentication middleware only",
+        "token verification only"
+      ]
+    },
+    {
+      "id": "E",
+      "title": "Change Customer Profile Holding",
+      "definition": "Add/remove/link products/accounts under customer profile.",
+      "strong_signals": [
+        "link product",
+        "attach account",
+        "profile service updates product list",
+        "write to relationship portfolio table"
+      ],
+      "weak_signals": [
+        "display only holdings summary",
+        "portfolio read endpoint only"
+      ],
+      "false_positives": [
+        "static product type mapping"
+      ]
+    },
+    {
+      "id": "F",
+      "title": "Duplicate CIF Merge",
+      "definition": "Merge duplicate customer identities (CIF).",
+      "strong_signals": [
+        "mergeCIF",
+        "mergeCustomer",
+        "deduplication workflow",
+        "survivorship rules",
+        "update multiple customer ids into one"
+      ],
+      "weak_signals": [
+        "duplicate detection only",
+        "data quality report"
+      ],
+      "false_positives": [
+        "search api returning duplicates with no merge"
+      ]
+    },
+    {
+      "id": "G",
+      "title": "Register New Device / Phone Number",
+      "definition": "Enroll device or change/add phone number for authentication.",
+      "strong_signals": [
+        "RegisterDevice",
+        "TrustedDevice",
+        "phone update endpoint",
+        "otp enrollment logic",
+        "device binding db write"
+      ],
+      "weak_signals": [
+        "otp verification only",
+        "device id read"
+      ],
+      "false_positives": [
+        "logging device fingerprint without registration"
+      ]
+    },
+    {
+      "id": "H",
+      "title": "Retrieve Username (non-PCI)",
+      "definition": "Recover or retrieve login id.",
+      "strong_signals": [
+        "ForgotUsername endpoint",
+        "lookup by email phone",
+        "identity verification flow returning username"
+      ],
+      "weak_signals": [
+        "login endpoint",
+        "username validation helper"
+      ],
+      "false_positives": [
+        "error message referencing username only"
+      ]
+    },
+    {
+      "id": "I1",
+      "title": "Internal Transfer – Same Customer Profile",
+      "definition": "Transfer between accounts under same connectId.",
+      "strong_signals": [
+        "transfer service validates same profile id",
+        "ledger internal transfer call",
+        "debit credit posting within same customer"
+      ],
+      "weak_signals": [
+        "balance update logic only",
+        "generic transfer utility"
+      ],
+      "false_positives": [
+        "mock transfer service",
+        "test ledger"
+      ]
+    },
+    {
+      "id": "I2",
+      "title": "Internal Transfer – Different TD Customer",
+      "definition": "Transfer to different TD customer profile.",
+      "strong_signals": [
+        "recipient resolution within td",
+        "validation of different connectid",
+        "internal funds posting"
+      ],
+      "weak_signals": [
+        "payee search within td",
+        "transfer dto without execution"
+      ],
+      "false_positives": [
+        "contact management only"
+      ]
+    },
+    {
+      "id": "J",
+      "title": "External Transfer (Outside TD)",
+      "definition": "Transfer to external payee/bank.",
+      "strong_signals": [
+        "ACH integration",
+        "EFT integration",
+        "wire transfer integration",
+        "routing number fields",
+        "external payment rail service",
+        "outbound payment queue"
+      ],
+      "weak_signals": [
+        "bank routing validation helper",
+        "payee type enum external"
+      ],
+      "false_positives": [
+        "external api client unrelated to payments"
+      ]
+    },
+    {
+      "id": "K",
+      "title": "Transfer to Existing Payee",
+      "definition": "Initiate payment to stored payee.",
+      "strong_signals": [
+        "transfer references payeeId",
+        "fetch payee then initiate transfer",
+        "recurring payment references saved payee"
+      ],
+      "weak_signals": [
+        "payee repository read only"
+      ],
+      "false_positives": [
+        "payee list display only"
+      ]
+    },
+    {
+      "id": "L",
+      "title": "Add/Modify Payee (Personal/Business)",
+      "definition": "Create or edit payee details.",
+      "strong_signals": [
+        "AddPayee",
+        "UpdatePayee",
+        "write to payee table",
+        "payee verification workflow"
+      ],
+      "weak_signals": [
+        "payee dto only"
+      ],
+      "false_positives": [
+        "static payee config"
+      ]
+    },
+    {
+      "id": "M",
+      "title": "Add/Modify TDBC Business Administrator",
+      "definition": "Manage business admin roles/permissions.",
+      "strong_signals": [
+        "AddAdmin",
+        "UpdateAdminRole",
+        "rbac provisioning call",
+        "business user role assignment"
+      ],
+      "weak_signals": [
+        "role enum definitions"
+      ],
+      "false_positives": [
+        "general rbac library only"
+      ]
+    },
+    {
+      "id": "N",
+      "title": "Collecting Money – Promise to Pay",
+      "definition": "Create/update Promise-to-Pay commitments.",
+      "strong_signals": [
+        "PromiseToPay",
+        "PTP",
+        "collections case update",
+        "payment schedule creation"
+      ],
+      "weak_signals": [
+        "collections reporting only"
+      ],
+      "false_positives": [
+        "payment reminder email template only"
+      ]
+    },
+    {
+      "id": "O",
+      "title": "Reduce Access to Money (Lower limits / block)",
+      "definition": "Decrease ability to transact.",
+      "strong_signals": [
+        "BlockAccount",
+        "ReduceLimit",
+        "update transaction limit table",
+        "status changed to suspended blocked"
+      ],
+      "weak_signals": [
+        "limit config read only"
+      ],
+      "false_positives": [
+        "feature flag toggle unrelated to money"
+      ]
+    },
+    {
+      "id": "P",
+      "title": "Increase Access to Money (Raise limits / unblock)",
+      "definition": "Increase transaction ability.",
+      "strong_signals": [
+        "IncreaseLimit",
+        "UnblockAccount",
+        "update limit value upward",
+        "remove block status"
+      ],
+      "weak_signals": [
+        "limit approval workflow without update"
+      ],
+      "false_positives": [
+        "admin config unrelated to transactions"
+      ]
+    }
+  ]
+}

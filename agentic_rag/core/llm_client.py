@@ -1,6 +1,7 @@
 import json
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 
@@ -114,11 +115,143 @@ class LLMClient:
     def chat(self, messages: List[Dict[str, str]], temperature: float = 0) -> str:
         url = f"{self.base_url}/chat/completions"
         payload = {"model": self.model, "messages": messages, "temperature": temperature}
-        r = requests.post(url, json=payload, timeout=self.timeout_s)
-        r.raise_for_status()
-        body = r.json()
+        started = time.perf_counter()
+        logger.info(
+            "LLM REST call started: endpoint=%s model=%s stream=false messages=%d timeout_s=%d",
+            url,
+            self.model,
+            len(messages),
+            self.timeout_s,
+        )
+        try:
+            r = requests.post(url, json=payload, timeout=self.timeout_s)
+            r.raise_for_status()
+            body = r.json()
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logger.exception(
+                "LLM REST call failed: endpoint=%s model=%s elapsed_ms=%.2f error=%s",
+                url,
+                self.model,
+                elapsed_ms,
+                exc,
+            )
+            raise
+
         self._record_usage(body)
+        usage = self.last_call_usage()
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        logger.info(
+            (
+                "LLM REST call completed: endpoint=%s model=%s status=%d elapsed_ms=%.2f "
+                "input_tokens=%d output_tokens=%d total_tokens=%d usage_reported=%s"
+            ),
+            url,
+            self.model,
+            r.status_code,
+            elapsed_ms,
+            int(usage.get("prompt_tokens", 0)),
+            int(usage.get("completion_tokens", 0)),
+            int(usage.get("total_tokens", 0)),
+            bool(usage.get("has_usage", False)),
+        )
         return body["choices"][0]["message"]["content"].strip()
+
+    def chat_stream(self, messages: List[Dict[str, str]], temperature: float = 0) -> Iterator[str]:
+        url = f"{self.base_url}/chat/completions"
+        payload = {"model": self.model, "messages": messages, "temperature": temperature, "stream": True}
+        started = time.perf_counter()
+        logger.info(
+            "LLM REST stream started: endpoint=%s model=%s stream=true messages=%d timeout_s=%d",
+            url,
+            self.model,
+            len(messages),
+            self.timeout_s,
+        )
+        try:
+            response = requests.post(url, json=payload, timeout=self.timeout_s, stream=True)
+            response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logger.exception(
+                "LLM REST stream failed to start: endpoint=%s model=%s elapsed_ms=%.2f error=%s",
+                url,
+                self.model,
+                elapsed_ms,
+                exc,
+            )
+            raise
+
+        usage_payload: Optional[Dict[str, Any]] = None
+        yielded_chunks = 0
+        yielded_chars = 0
+        for raw_line in response.iter_lines():
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8").strip()
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line or line == "[DONE]":
+                continue
+
+            try:
+                chunk = json.loads(line)
+            except json.JSONDecodeError:
+                logger.debug("Skipping non-JSON stream line: %s", line)
+                continue
+
+            if isinstance(chunk.get("usage"), dict):
+                usage_payload = chunk["usage"]  # type: ignore[assignment]
+
+            choices = chunk.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta") if isinstance(choice, dict) else None
+            if isinstance(delta, dict):
+                token = delta.get("content")
+                if isinstance(token, str) and token:
+                    yielded_chunks += 1
+                    yielded_chars += len(token)
+                    yield token
+                    continue
+            message = choice.get("message") if isinstance(choice, dict) else None
+            if isinstance(message, dict):
+                token = message.get("content")
+                if isinstance(token, str) and token:
+                    yielded_chunks += 1
+                    yielded_chars += len(token)
+                    yield token
+
+        if usage_payload is not None:
+            self._record_usage({"usage": usage_payload})
+        else:
+            self._usage["requests"] += 1
+            self._usage["missing_usage_responses"] += 1
+            self._last_call_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "has_usage": False,
+            }
+        usage = self.last_call_usage()
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        logger.info(
+            (
+                "LLM REST stream completed: endpoint=%s model=%s status=%d elapsed_ms=%.2f chunks=%d chars=%d "
+                "input_tokens=%d output_tokens=%d total_tokens=%d usage_reported=%s"
+            ),
+            url,
+            self.model,
+            response.status_code,
+            elapsed_ms,
+            yielded_chunks,
+            yielded_chars,
+            int(usage.get("prompt_tokens", 0)),
+            int(usage.get("completion_tokens", 0)),
+            int(usage.get("total_tokens", 0)),
+            bool(usage.get("has_usage", False)),
+        )
 
     @staticmethod
     def _extract_json_segment(text: str) -> Optional[str]:
@@ -194,12 +327,21 @@ class LLMClient:
             "temperature": 0,
             "max_tokens": 1,
         }
-        logger.debug("LLM probe request: url=%s model=%s timeout_s=%s", url, self.model, self.timeout_s)
+        started = time.perf_counter()
+        logger.info("LLM probe request started: endpoint=%s model=%s timeout_s=%s", url, self.model, self.timeout_s)
         r = requests.post(url, json=payload, timeout=self.timeout_s)
         r.raise_for_status()
         body = r.json()
         choices = body.get("choices")
         if not isinstance(choices, list) or not choices:
             raise ValueError("LLM probe failed: missing choices in response")
-        logger.debug("LLM probe response received: choices=%d", len(choices))
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        logger.info(
+            "LLM probe response received: endpoint=%s model=%s status=%d elapsed_ms=%.2f choices=%d",
+            url,
+            self.model,
+            r.status_code,
+            elapsed_ms,
+            len(choices),
+        )
         return body

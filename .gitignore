@@ -2,17 +2,27 @@
 .DS_Store
 Thumbs.db
 Desktop.ini
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon?
 
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
 *$py.class
+*.py,cover
 
-# Python environments
+# Python environments and local tool state
 .venv/
 venv/
 env/
 ENV/
+__pypackages__/
+.python-version
+.direnv/
 
 # Python tooling caches
 .pytest_cache/
@@ -22,6 +32,7 @@ ENV/
 .hypothesis/
 .tox/
 .nox/
+.cache/
 
 # Coverage and test artifacts
 .coverage
@@ -45,8 +56,17 @@ pip-wheel-metadata/
 *.swo
 *~
 
-# Streamlit local secrets
-.streamlit/secrets.toml
+# Frontend artifacts (React/Vite/TypeScript)
+web_ui/node_modules/
+web_ui/dist/
+web_ui/.vite/
+web_ui/.npm/
+web_ui/.pnpm-store/
+web_ui/coverage/
+web_ui/.eslintcache
+web_ui/*.tsbuildinfo
+web_ui/vite.config.js
+web_ui/vite.config.d.ts
 
 # Runtime-generated project data
 out_index/
@@ -59,5 +79,10 @@ reports/
 
 # Logs and temp files
 *.log
+*.pid
 *.tmp
 *.temp
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

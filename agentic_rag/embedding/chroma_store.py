@@ -88,3 +88,42 @@ class ChromaStore:
             return [meta for meta in metadatas_raw if isinstance(meta, dict)]
         metadatas = response.get("metadatas") or []
         return [meta for meta in metadatas if isinstance(meta, dict)]
+
+    def get_records(
+        self,
+        collection_name: str,
+        limit: int,
+        offset: int = 0,
+        where: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        col = self.get_or_create(collection_name)
+        kwargs: Dict[str, Any] = {
+            "limit": max(1, limit),
+            "offset": max(0, offset),
+            "include": ["documents", "metadatas"],
+        }
+        if where:
+            kwargs["where"] = where
+        try:
+            response = col.get(**kwargs)
+        except TypeError:
+            fallback_kwargs: Dict[str, Any] = {
+                "limit": max(1, limit + max(0, offset)),
+                "include": ["documents", "metadatas"],
+            }
+            if where:
+                fallback_kwargs["where"] = where
+            response = col.get(**fallback_kwargs)
+            ids = (response.get("ids") or [])[offset: offset + max(1, limit)]
+            docs = (response.get("documents") or [])[offset: offset + max(1, limit)]
+            metas = (response.get("metadatas") or [])[offset: offset + max(1, limit)]
+            return {
+                "ids": ids,
+                "documents": docs,
+                "metadatas": metas,
+            }
+        return {
+            "ids": response.get("ids") or [],
+            "documents": response.get("documents") or [],
+            "metadatas": response.get("metadatas") or [],
+        }

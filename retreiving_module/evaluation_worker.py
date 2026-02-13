@@ -6,8 +6,8 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from agentic_rag.agentic_ai.orchestrator import AgenticRagOrchestrator
 from agentic_rag.core.config_loader import load_agentic_rag_config
+from retreiving_module.service import StoreRetriever
 
 
 logger = logging.getLogger(__name__)
@@ -36,11 +36,11 @@ def _write_status(path: str, payload: Dict[str, Any]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Background embedding worker")
+    parser = argparse.ArgumentParser(description="Background evaluation worker")
     parser.add_argument("--config", required=True, help="Path to config file")
-    parser.add_argument("--repo-path", required=True, help="Repository path to ingest")
-    parser.add_argument("--repo-name", required=True, help="Repo tag for metadata")
-    parser.add_argument("--job-id", required=True, help="Embedding job id")
+    parser.add_argument("--repo-path", required=True, help="Repository path to evaluate")
+    parser.add_argument("--repo-name", required=True, help="Repo tag for retrieval")
+    parser.add_argument("--job-id", required=True, help="Evaluation job id")
     parser.add_argument("--status-path", required=True, help="Path to job status json")
     args = parser.parse_args()
 
@@ -49,7 +49,7 @@ def main() -> int:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
     logger.info(
-        "Embedding worker started: job_id=%s repo_name=%s repo_path=%s config=%s",
+        "Evaluation worker started: job_id=%s repo_name=%s repo_path=%s config=%s",
         args.job_id,
         args.repo_name,
         args.repo_path,
@@ -70,33 +70,35 @@ def main() -> int:
 
     try:
         cfg = load_agentic_rag_config(args.config)
-        cfg = cfg.model_copy(
-            update={
-                "paths": cfg.paths.model_copy(update={"repo_path": os.path.abspath(args.repo_path)}),
-            }
+        retriever = StoreRetriever.from_config(cfg, config_path=args.config)
+        summary = retriever.run_evaluation(
+            repo_name=args.repo_name,
+            repo_path=args.repo_path,
+            job_id=args.job_id,
         )
-        orchestrator = AgenticRagOrchestrator(cfg, repo_name=args.repo_name)
-        summary = orchestrator.run()
-        run_status = str(summary.get("embedding_run_status", "completed"))
-        job_status = "completed_partial" if run_status == "completed_partial" else "completed"
-        file_status_counts = summary.get("file_status_counts", {})
-        files = summary.get("files", [])
+
+        run_status = str(summary.get("status", "completed")).strip().lower()
+        if run_status not in {"completed", "completed_partial"}:
+            run_status = "completed"
+
         status.update({
-            "status": job_status,
+            "status": run_status,
             "finished_at_utc": _utc_now(),
             "summary": summary,
-            "report_path": str(summary.get("report_path", "")),
-            "partial": job_status == "completed_partial",
-            "file_status_counts": file_status_counts,
-            "files": files,
+            "report_html_path": str(summary.get("report_html_path", "")),
+            "report_json_path": str(summary.get("report_json_path", "")),
+            "status_counts": summary.get("status_counts", {}),
+            "rule_count": int(summary.get("rule_count", 0)),
+            "partial": run_status == "completed_partial",
+            "error": str(summary.get("error", "")),
         })
         _write_status(args.status_path, status)
         logger.info(
-            "Embedding worker completed: job_id=%s status=%s files_changed=%s nodes_embedded=%s",
+            "Evaluation worker completed: job_id=%s status=%s rule_count=%s detected=%s",
             args.job_id,
-            job_status,
-            summary.get("files_changed_indexed"),
-            summary.get("nodes_embedded_upserted"),
+            run_status,
+            summary.get("rule_count"),
+            (summary.get("status_counts") or {}).get("detected"),
         )
         return 0
     except Exception as exc:  # noqa: BLE001
@@ -107,7 +109,7 @@ def main() -> int:
             "traceback": traceback.format_exc(),
         })
         _write_status(args.status_path, status)
-        logger.exception("Embedding worker failed: job_id=%s error=%s", args.job_id, exc)
+        logger.exception("Evaluation worker failed: job_id=%s error=%s", args.job_id, exc)
         return 1
 
 

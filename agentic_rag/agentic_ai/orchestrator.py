@@ -186,6 +186,7 @@ class AgenticRagOrchestrator:
         total_nodes = 0
         embedded_nodes = 0
         pending_nodes: List[CodeNode] = []
+        pending_file_paths: Dict[str, bool] = {}
         fallback_allowed_exts = set(self.cfg.fallback.parse.allowed_exts)
         security_supported_exts = set(self.cfg.security_tagging.supported_exts)
         node_type_counts: Dict[str, int] = {}
@@ -195,177 +196,360 @@ class AgenticRagOrchestrator:
         parser_llm_fallback_attempts = 0
         parser_llm_fallback_failures = 0
         parser_llm_fallback_nodes_added = 0
+        embedding_flush_failures = 0
+        file_reports: List[Dict[str, Any]] = []
+        file_report_index: Dict[str, Dict[str, Any]] = {}
 
-        for idx, rf in enumerate(files, start=1):
-            logger.info("Processing file %d/%d: rel_path=%s ext=%s size=%d", idx, len(files), rf.rel_path, rf.ext, rf.size)
-            text = self.repo.read_file(rf.rel_path)
-            file_hash = sha256_text(text)
+        def flush_pending(flush_reason: str) -> None:
+            nonlocal embedded_nodes, embedding_flush_failures
+            if not pending_nodes:
+                return
 
-            prev_hash = self.sqlite.get_file_hash(rf.rel_path)
-            if prev_hash == file_hash:
-                logger.debug("Skipping unchanged file: %s", rf.rel_path)
-                continue
-
-            changed_files += 1
-            logger.info("File changed and selected for indexing: %s", rf.rel_path)
-            self.sqlite.upsert_file(rf.rel_path, file_hash)
-
-            nodes, conf, lang = self.parser.parse_file(rf.rel_path, text, rf.ext)
-            seen = {n.node_id for n in nodes}
-            parser_error = any((n.metadata or {}).get("parse_error") for n in nodes)
+            involved_files = list(pending_file_paths.keys())
             logger.info(
-                "Deterministic parse result: file=%s lang=%s nodes=%d confidence=%.4f parser_error=%s",
-                rf.rel_path,
-                lang,
-                len(nodes),
-                conf,
-                parser_error,
+                "Embedding flush triggered: reason=%s pending_nodes=%d files=%d batch_size=%d",
+                flush_reason,
+                len(pending_nodes),
+                len(involved_files),
+                self.cfg.embedding.batch_size,
             )
-            low_confidence_fallback = (
-                self.cfg.fallback.parse.enabled
-                and conf < self.cfg.fallback.parse.confidence_threshold
-                and rf.ext in fallback_allowed_exts
-                and is_important_file(
-                    rf.rel_path,
-                    text,
-                    important_dir_hints=self.cfg.fallback.parse.important_dir_hints,
-                    important_keywords=self.cfg.fallback.parse.important_keywords,
-                )
-            )
-            should_try_llm_fallback = parser_error or low_confidence_fallback
-
-            if should_try_llm_fallback:
-                parser_llm_fallback_attempts += 1
-                reason = "parser_error" if parser_error else "low_confidence_important_file"
-                logger.info(
-                    "LLM parser fallback triggered: file=%s reason=%s conf=%.4f threshold=%.4f",
-                    rf.rel_path,
-                    reason,
-                    conf,
-                    self.cfg.fallback.parse.confidence_threshold,
-                )
-                try:
-                    header = "\n".join(text.splitlines()[: self.cfg.io_limits.llm_header_preview_lines])
-                    plan = self.agent.propose_plan(rf.rel_path, lang, header)
-                    logger.info(
-                        "LLM fallback plan generated: file=%s steps=%d",
-                        rf.rel_path,
-                        len(plan.get("steps", [])) if isinstance(plan, dict) else 0,
-                    )
-                    tool_out = execute_tool_plan(self.repo, plan)
-                    final = self.agent.finalize(rf.rel_path, lang, tool_out)
-
-                    llm_nodes = build_nodes_from_agent(
-                        file_path=rf.rel_path,
-                        file_text=text,
-                        language=final.get("language", lang),
-                        agent_json=final,
-                    )
-
-                    llm_added = 0
-                    for n in llm_nodes:
-                        if n.node_id not in seen:
-                            nodes.append(n)
-                            seen.add(n.node_id)
-                            llm_added += 1
-                    parser_llm_fallback_nodes_added += llm_added
-                    logger.info(
-                        "LLM parser fallback completed: file=%s llm_nodes_total=%d llm_nodes_added=%d",
-                        rf.rel_path,
-                        len(llm_nodes),
-                        llm_added,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    parser_llm_fallback_failures += 1
-                    logger.exception("LLM parser fallback failed: file=%s error=%s", rf.rel_path, exc)
-                    logger.warning(
-                        "Continuing with deterministic nodes after fallback failure: file=%s nodes=%d",
-                        rf.rel_path,
-                        len(nodes),
-                    )
-
-            if (
-                self.security_agent
-                and self.cfg.security_tagging.enabled
-                and rf.ext in security_supported_exts
-            ):
-                security_tagger_attempts += 1
-                logger.info("Security tagging triggered: file=%s ext=%s", rf.rel_path, rf.ext)
-                try:
-                    security_header = "\n".join(text.splitlines()[: self.cfg.security_tagging.max_header_lines])
-                    security_plan = self.security_agent.propose_plan(rf.rel_path, lang, security_header)
-                    logger.info(
-                        "Security plan generated: file=%s steps=%d",
-                        rf.rel_path,
-                        len(security_plan.get("steps", [])) if isinstance(security_plan, dict) else 0,
-                    )
-                    security_tool_out = execute_tool_plan(self.repo, security_plan)
-                    security_final = self.security_agent.finalize(rf.rel_path, lang, security_tool_out)
-                    security_nodes = build_security_nodes_from_agent(
-                        file_path=rf.rel_path,
-                        file_text=text,
-                        language=security_final.get("language", lang),
-                        agent_json=security_final,
-                    )
-                    security_added = 0
-                    for n in security_nodes:
-                        if n.node_id in seen:
-                            continue
-                        nodes.append(n)
-                        seen.add(n.node_id)
-                        security_added += 1
-                        if n.node_type in {"auth_guard", "policy_check", "audit_log", "sensitive_op"}:
-                            security_tags_generated += 1
-                    logger.info(
-                        "Security tagging completed: file=%s security_nodes_total=%d security_nodes_added=%d",
-                        rf.rel_path,
-                        len(security_nodes),
-                        security_added,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    security_tagger_failures += 1
-                    logger.exception("Security tagging failed: file=%s error=%s", rf.rel_path, exc)
-
-            for n in nodes:
-                total_nodes += 1
-                node_type_counts[n.node_type] = int(node_type_counts.get(n.node_type, 0)) + 1
-                self.sqlite.upsert_node(
-                    node_id=n.node_id,
-                    file_path=n.file_path,
-                    node_type=n.node_type,
-                    language=n.language,
-                    start_line=n.start_line,
-                    end_line=n.end_line,
-                    symbol=n.symbol,
-                    content_hash=n.content_hash,
-                    confidence=float(n.confidence),
-                    text=n.text,
-                    metadata=n.metadata,
-                )
-                pending_nodes.append(n)
-
-            if len(pending_nodes) >= self.cfg.embedding.batch_size:
-                logger.info(
-                    "Embedding flush triggered: pending_nodes=%d batch_size=%d",
-                    len(pending_nodes),
-                    self.cfg.embedding.batch_size,
-                )
-                embedded_nodes += self.embedding.upsert_nodes(
+            try:
+                upserted = self.embedding.upsert_nodes(
                     pending_nodes,
                     batch_size=self.cfg.embedding.batch_size,
                 )
+                embedded_nodes += upserted
+                for file_path in involved_files:
+                    file_report = file_report_index.get(file_path)
+                    if not file_report:
+                        continue
+                    embedding_meta = file_report.get("embedding")
+                    if isinstance(embedding_meta, dict):
+                        embedding_meta["status"] = "success"
+                        embedding_meta["error"] = ""
+                logger.info(
+                    "Embedding flush completed: reason=%s files=%d nodes_upserted=%d",
+                    flush_reason,
+                    len(involved_files),
+                    upserted,
+                )
+            except Exception as exc:  # noqa: BLE001
+                embedding_flush_failures += 1
+                err_text = str(exc)
+                logger.exception(
+                    "Embedding flush failed: reason=%s files=%d pending_nodes=%d error=%s",
+                    flush_reason,
+                    len(involved_files),
+                    len(pending_nodes),
+                    err_text,
+                )
+                for file_path in involved_files:
+                    file_report = file_report_index.get(file_path)
+                    if not file_report:
+                        continue
+                    file_report["partial"] = True
+                    errors = file_report.get("errors")
+                    if isinstance(errors, list):
+                        errors.append(f"embedding_error: {err_text}")
+                    file_report["status"] = "failed"
+                    embedding_meta = file_report.get("embedding")
+                    if isinstance(embedding_meta, dict):
+                        embedding_meta["status"] = "failed"
+                        embedding_meta["error"] = err_text
+            finally:
                 pending_nodes.clear()
+                pending_file_paths.clear()
+
+        for idx, rf in enumerate(files, start=1):
+            file_report: Dict[str, Any] = {
+                "file_path": rf.rel_path,
+                "ext": rf.ext,
+                "size_bytes": rf.size,
+                "changed": False,
+                "status": "success",
+                "partial": False,
+                "language": "",
+                "confidence": 0.0,
+                "deterministic_nodes": 0,
+                "total_nodes": 0,
+                "llm_fallback": {
+                    "attempted": False,
+                    "success": False,
+                    "nodes_added": 0,
+                    "error": "",
+                },
+                "security_tagging": {
+                    "attempted": False,
+                    "success": False,
+                    "nodes_added": 0,
+                    "error": "",
+                },
+                "embedding": {
+                    "status": "pending",
+                    "queued_nodes": 0,
+                    "error": "",
+                },
+                "errors": [],
+            }
+            file_reports.append(file_report)
+            file_report_index[rf.rel_path] = file_report
+
+            logger.info("Processing file %d/%d: rel_path=%s ext=%s size=%d", idx, len(files), rf.rel_path, rf.ext, rf.size)
+            try:
+                text = self.repo.read_file(rf.rel_path)
+                file_hash = sha256_text(text)
+
+                prev_hash = self.sqlite.get_file_hash(rf.rel_path)
+                if prev_hash == file_hash:
+                    logger.debug("Skipping unchanged file: %s", rf.rel_path)
+                    file_report["status"] = "skipped_unchanged"
+                    embedding_meta = file_report.get("embedding")
+                    if isinstance(embedding_meta, dict):
+                        embedding_meta["status"] = "skipped"
+                    continue
+
+                file_report["changed"] = True
+                changed_files += 1
+                logger.info("File changed and selected for indexing: %s", rf.rel_path)
+                self.sqlite.upsert_file(rf.rel_path, file_hash)
+
+                nodes, conf, lang = self.parser.parse_file(rf.rel_path, text, rf.ext)
+                seen = {n.node_id for n in nodes}
+                parser_error = any((n.metadata or {}).get("parse_error") for n in nodes)
+                file_report["language"] = lang
+                file_report["confidence"] = float(conf)
+                file_report["deterministic_nodes"] = len(nodes)
+                logger.info(
+                    "Deterministic parse result: file=%s lang=%s nodes=%d confidence=%.4f parser_error=%s",
+                    rf.rel_path,
+                    lang,
+                    len(nodes),
+                    conf,
+                    parser_error,
+                )
+
+                low_confidence_fallback = (
+                    self.cfg.fallback.parse.enabled
+                    and conf < self.cfg.fallback.parse.confidence_threshold
+                    and rf.ext in fallback_allowed_exts
+                    and is_important_file(
+                        rf.rel_path,
+                        text,
+                        important_dir_hints=self.cfg.fallback.parse.important_dir_hints,
+                        important_keywords=self.cfg.fallback.parse.important_keywords,
+                    )
+                )
+                should_try_llm_fallback = parser_error or low_confidence_fallback
+
+                if should_try_llm_fallback:
+                    parser_llm_fallback_attempts += 1
+                    llm_meta = file_report.get("llm_fallback")
+                    if isinstance(llm_meta, dict):
+                        llm_meta["attempted"] = True
+                    reason = "parser_error" if parser_error else "low_confidence_important_file"
+                    logger.info(
+                        "LLM parser fallback triggered: file=%s reason=%s conf=%.4f threshold=%.4f",
+                        rf.rel_path,
+                        reason,
+                        conf,
+                        self.cfg.fallback.parse.confidence_threshold,
+                    )
+                    try:
+                        header = "\n".join(text.splitlines()[: self.cfg.io_limits.llm_header_preview_lines])
+                        plan = self.agent.propose_plan(rf.rel_path, lang, header)
+                        logger.info(
+                            "LLM fallback plan generated: file=%s steps=%d",
+                            rf.rel_path,
+                            len(plan.get("steps", [])) if isinstance(plan, dict) else 0,
+                        )
+                        tool_out = execute_tool_plan(self.repo, plan)
+                        final = self.agent.finalize(rf.rel_path, lang, tool_out)
+
+                        llm_nodes = build_nodes_from_agent(
+                            file_path=rf.rel_path,
+                            file_text=text,
+                            language=final.get("language", lang),
+                            agent_json=final,
+                        )
+
+                        llm_added = 0
+                        for n in llm_nodes:
+                            if n.node_id not in seen:
+                                nodes.append(n)
+                                seen.add(n.node_id)
+                                llm_added += 1
+                        parser_llm_fallback_nodes_added += llm_added
+                        if isinstance(llm_meta, dict):
+                            llm_meta["success"] = True
+                            llm_meta["nodes_added"] = llm_added
+                            llm_meta["error"] = ""
+                        logger.info(
+                            "LLM parser fallback completed: file=%s llm_nodes_total=%d llm_nodes_added=%d",
+                            rf.rel_path,
+                            len(llm_nodes),
+                            llm_added,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        parser_llm_fallback_failures += 1
+                        err_text = str(exc)
+                        logger.exception("LLM parser fallback failed: file=%s error=%s", rf.rel_path, err_text)
+                        logger.warning(
+                            "Continuing with deterministic nodes after fallback failure: file=%s nodes=%d",
+                            rf.rel_path,
+                            len(nodes),
+                        )
+                        file_report["partial"] = True
+                        errors = file_report.get("errors")
+                        if isinstance(errors, list):
+                            errors.append(f"llm_fallback_error: {err_text}")
+                        if isinstance(llm_meta, dict):
+                            llm_meta["success"] = False
+                            llm_meta["error"] = err_text
+
+                if (
+                    self.security_agent
+                    and self.cfg.security_tagging.enabled
+                    and rf.ext in security_supported_exts
+                ):
+                    security_tagger_attempts += 1
+                    security_meta = file_report.get("security_tagging")
+                    if isinstance(security_meta, dict):
+                        security_meta["attempted"] = True
+                    logger.info("Security tagging triggered: file=%s ext=%s", rf.rel_path, rf.ext)
+                    try:
+                        security_header = "\n".join(text.splitlines()[: self.cfg.security_tagging.max_header_lines])
+                        security_plan = self.security_agent.propose_plan(rf.rel_path, lang, security_header)
+                        logger.info(
+                            "Security plan generated: file=%s steps=%d",
+                            rf.rel_path,
+                            len(security_plan.get("steps", [])) if isinstance(security_plan, dict) else 0,
+                        )
+                        security_tool_out = execute_tool_plan(self.repo, security_plan)
+                        security_final = self.security_agent.finalize(rf.rel_path, lang, security_tool_out)
+                        security_nodes = build_security_nodes_from_agent(
+                            file_path=rf.rel_path,
+                            file_text=text,
+                            language=security_final.get("language", lang),
+                            agent_json=security_final,
+                        )
+                        security_added = 0
+                        for n in security_nodes:
+                            if n.node_id in seen:
+                                continue
+                            nodes.append(n)
+                            seen.add(n.node_id)
+                            security_added += 1
+                            if n.node_type in {"auth_guard", "policy_check", "audit_log", "sensitive_op"}:
+                                security_tags_generated += 1
+                        if isinstance(security_meta, dict):
+                            security_meta["success"] = True
+                            security_meta["nodes_added"] = security_added
+                            security_meta["error"] = ""
+                        logger.info(
+                            "Security tagging completed: file=%s security_nodes_total=%d security_nodes_added=%d",
+                            rf.rel_path,
+                            len(security_nodes),
+                            security_added,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        security_tagger_failures += 1
+                        err_text = str(exc)
+                        logger.exception("Security tagging failed: file=%s error=%s", rf.rel_path, err_text)
+                        file_report["partial"] = True
+                        errors = file_report.get("errors")
+                        if isinstance(errors, list):
+                            errors.append(f"security_tagger_error: {err_text}")
+                        if isinstance(security_meta, dict):
+                            security_meta["success"] = False
+                            security_meta["error"] = err_text
+
+                file_report["total_nodes"] = len(nodes)
+                embedding_meta = file_report.get("embedding")
+                if isinstance(embedding_meta, dict):
+                    embedding_meta["queued_nodes"] = len(nodes)
+
+                if not nodes:
+                    file_report["status"] = "error"
+                    file_report["partial"] = True
+                    errors = file_report.get("errors")
+                    if isinstance(errors, list):
+                        errors.append("no_nodes_generated")
+                    if isinstance(embedding_meta, dict):
+                        embedding_meta["status"] = "skipped"
+                    continue
+
+                for n in nodes:
+                    total_nodes += 1
+                    node_type_counts[n.node_type] = int(node_type_counts.get(n.node_type, 0)) + 1
+                    self.sqlite.upsert_node(
+                        node_id=n.node_id,
+                        file_path=n.file_path,
+                        node_type=n.node_type,
+                        language=n.language,
+                        start_line=n.start_line,
+                        end_line=n.end_line,
+                        symbol=n.symbol,
+                        content_hash=n.content_hash,
+                        confidence=float(n.confidence),
+                        text=n.text,
+                        metadata=n.metadata,
+                    )
+                    pending_nodes.append(n)
+                pending_file_paths[rf.rel_path] = True
+
+                if len(pending_nodes) >= self.cfg.embedding.batch_size:
+                    flush_pending("batch_threshold")
+
+            except Exception as exc:  # noqa: BLE001
+                err_text = str(exc)
+                logger.exception("Failed processing file: file=%s error=%s", rf.rel_path, err_text)
+                file_report["status"] = "failed"
+                file_report["partial"] = False
+                errors = file_report.get("errors")
+                if isinstance(errors, list):
+                    errors.append(f"file_processing_error: {err_text}")
+                embedding_meta = file_report.get("embedding")
+                if isinstance(embedding_meta, dict):
+                    embedding_meta["status"] = "failed"
+                    embedding_meta["error"] = err_text
 
         if pending_nodes:
-            logger.info(
-                "Final embedding flush triggered: pending_nodes=%d batch_size=%d",
-                len(pending_nodes),
-                self.cfg.embedding.batch_size,
-            )
-            embedded_nodes += self.embedding.upsert_nodes(
-                pending_nodes,
-                batch_size=self.cfg.embedding.batch_size,
-            )
+            flush_pending("final_flush")
+
+        file_status_counts: Dict[str, int] = {}
+        partial_files_count = 0
+        for file_report in file_reports:
+            status = str(file_report.get("status", "success"))
+            if status not in {"failed", "skipped_unchanged"}:
+                llm_meta = file_report.get("llm_fallback")
+                security_meta = file_report.get("security_tagging")
+                embedding_meta = file_report.get("embedding")
+                errors = file_report.get("errors")
+                has_errors = isinstance(errors, list) and len(errors) > 0
+                embedding_status = ""
+                if isinstance(embedding_meta, dict):
+                    embedding_status = str(embedding_meta.get("status", ""))
+                llm_success = isinstance(llm_meta, dict) and bool(llm_meta.get("success"))
+                security_success = isinstance(security_meta, dict) and bool(security_meta.get("success"))
+                used_llm_success = llm_success or security_success
+
+                if embedding_status == "failed":
+                    status = "failed"
+                    file_report["partial"] = True
+                elif has_errors:
+                    status = "error"
+                    file_report["partial"] = True
+                elif used_llm_success:
+                    status = "success_with_llm"
+                elif file_report.get("changed"):
+                    status = "success"
+                else:
+                    status = "skipped_unchanged"
+                file_report["status"] = status
+
+            if bool(file_report.get("partial")):
+                partial_files_count += 1
+            file_status_counts[status] = int(file_status_counts.get(status, 0)) + 1
 
         run_finished = datetime.now(timezone.utc)
         embedding_telemetry = self.embedding.telemetry()
@@ -406,21 +590,30 @@ class AgenticRagOrchestrator:
             "missing_usage_responses": int(embedding_usage.get("missing_usage_responses", 0)),
             "input_items": int(embedding_usage.get("input_items", 0)),
         }
+        failed_files_count = int(file_status_counts.get("failed", 0))
+        errored_files_count = int(file_status_counts.get("error", 0))
+        run_status = "completed_partial" if (failed_files_count > 0 or errored_files_count > 0) else "completed"
 
         summary = {
             "repo_path": self.cfg.paths.repo_path,
             "repo_name": self.repo_name,
+            "embedding_run_status": run_status,
             "base_url": self.cfg.embedding.base_url,
             "stacks": stacks,
             "frameworks": frameworks,
             "stack_confidence": stack_conf,
             "files_scanned": len(files),
             "files_changed_indexed": changed_files,
+            "files_partial": partial_files_count,
+            "files_failed": failed_files_count,
+            "files_error": errored_files_count,
+            "file_status_counts": dict(sorted(file_status_counts.items(), key=lambda item: item[0])),
             "nodes_created_or_updated": total_nodes,
             "nodes_embedded_upserted": embedded_nodes,
             "node_type_counts": dict(sorted(node_type_counts.items(), key=lambda item: item[0])),
             "chroma_counts": self.embedding.counts(),
             "embedding_collection_totals_run": embedding_telemetry.get("collection_totals", {}),
+            "embedding_flush_failures": embedding_flush_failures,
             "security_tags_generated": security_tags_generated,
             "security_tagger_attempts": security_tagger_attempts,
             "security_tagger_failures": security_tagger_failures,
@@ -429,6 +622,7 @@ class AgenticRagOrchestrator:
             "parser_llm_fallback_nodes_added": parser_llm_fallback_nodes_added,
             "chat_token_usage": chat_token_usage,
             "embedding_token_usage": embedding_token_usage,
+            "files": file_reports,
         }
         report_payload = {
             "report_type": "agentic_rag_ingestion",
@@ -436,6 +630,7 @@ class AgenticRagOrchestrator:
             "run_started_at_utc": run_started.isoformat(),
             "run_finished_at_utc": run_finished.isoformat(),
             "summary": summary,
+            "files": file_reports,
             "embedding": embedding_telemetry,
             "token_usage": {
                 "chat": chat_token_usage,
@@ -489,11 +684,18 @@ class AgenticRagOrchestrator:
         summary["report_path"] = report_path
         summary["report_generated_at_utc"] = run_finished.isoformat()
         logger.info(
-            "Ingestion run completed: repo_name=%s changed_files=%d nodes=%d embedded=%d security_tags=%d parser_fallback_failures=%d report=%s",
+            (
+                "Ingestion run completed: repo_name=%s status=%s changed_files=%d nodes=%d embedded=%d "
+                "partial_files=%d failed_files=%d error_files=%d security_tags=%d parser_fallback_failures=%d report=%s"
+            ),
             self.repo_name,
+            run_status,
             changed_files,
             total_nodes,
             embedded_nodes,
+            partial_files_count,
+            failed_files_count,
+            errored_files_count,
             security_tags_generated,
             parser_llm_fallback_failures,
             report_path,

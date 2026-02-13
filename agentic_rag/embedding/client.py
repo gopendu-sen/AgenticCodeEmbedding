@@ -1,6 +1,11 @@
+import logging
+import time
 from typing import Any, Dict, List
 
 import requests
+
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingClient:
@@ -117,9 +122,46 @@ class EmbeddingClient:
         """OpenAI-compatible embeddings: expects response.data[].embedding"""
         url = f"{self.base_url}/embeddings"
         payload = {"model": self.model, "input": texts}
-        r = requests.post(url, json=payload, timeout=self.timeout_s)
-        r.raise_for_status()
-        body = r.json()
+        started = time.perf_counter()
+        logger.info(
+            "Embedding REST call started: endpoint=%s model=%s batch_items=%d timeout_s=%d",
+            url,
+            self.model,
+            len(texts),
+            self.timeout_s,
+        )
+        try:
+            r = requests.post(url, json=payload, timeout=self.timeout_s)
+            r.raise_for_status()
+            body = r.json()
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logger.exception(
+                "Embedding REST call failed: endpoint=%s model=%s elapsed_ms=%.2f error=%s",
+                url,
+                self.model,
+                elapsed_ms,
+                exc,
+            )
+            raise
+
         self._record_usage(body, input_items=len(texts))
+        usage = self.last_call_usage()
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        logger.info(
+            (
+                "Embedding REST call completed: endpoint=%s model=%s status=%d elapsed_ms=%.2f "
+                "batch_items=%d input_tokens=%d output_tokens=%d total_tokens=%d usage_reported=%s"
+            ),
+            url,
+            self.model,
+            r.status_code,
+            elapsed_ms,
+            len(texts),
+            int(usage.get("prompt_tokens", 0)),
+            int(usage.get("completion_tokens", 0)),
+            int(usage.get("total_tokens", 0)),
+            bool(usage.get("has_usage", False)),
+        )
         data = body["data"]
         return [item["embedding"] for item in data]

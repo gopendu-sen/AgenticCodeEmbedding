@@ -235,14 +235,40 @@ logging:
   level: "INFO"
   embedding_verbose_per_node: true
 
+evaluation:
+  rules_json_path: "./retreiving_module/default_evaluation_rules.json"
+  jobs_dir: "./reports/evaluation_jobs"
+  reports_dir: "./reports/evaluations"
+  log_jsonl_path: "./reports/evaluation_log.jsonl"
+  evidence_per_item: 5
+  max_candidates_per_item: 30
+  max_snippet_chars: 1200
+  llm_timeout_s: 120
+  html_title: "Code RAG Evaluation Report"
+
 chat:
   title: "Code RAG Chatbot"
-  subtitle: "Ask repository questions with retrieval-augmented context."
-  assistant_greeting: "Hi, I can help you navigate and reason about the indexed codebase."
+  subtitle: "AuditPilot AI - Code Auditor Assistant and Audit Finding Generator."
+  assistant_greeting: "Hi, I can help you analyze code, trace controls, and generate audit-ready findings."
   input_placeholder: "Ask a question about the repository..."
   spinner_text: "Thinking..."
   system_prompt: "You are a repository assistant. Answer using the retrieved context first. If context is insufficient, say so clearly and provide the best possible guidance without fabricating."
   history_messages: 12
+  api:
+    host: "0.0.0.0"
+    port: 8005
+    cors_allowed_origins:
+      - "http://localhost:5173"
+      - "http://127.0.0.1:5173"
+      - "http://localhost:4173"
+      - "http://127.0.0.1:4173"
+  memory:
+    sqlite_path: "./out_index/chat_memory.db"
+    max_history_messages: 20
+    enable_summarisation: true
+    enable_intent_tracking: false
+    summarise_prompt: "Summarise the conversation so far in under 140 words. Focus on concrete code findings and unresolved questions."
+    intent_prompt: "Identify the user's primary intent in the latest message. Respond with a short verb-noun phrase."
   retrieval:
     base_top_k: 3
     intent_weights:

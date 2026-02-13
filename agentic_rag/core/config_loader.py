@@ -118,6 +118,21 @@ def _resolve_config_paths(config_data: Dict[str, Any], config_dir: str) -> None:
             raise ConfigLoaderError(f"paths.{key} must be a non-empty string")
         paths[key] = _resolve_path(raw, config_dir)
 
+    chat = config_data.get("chat")
+    if isinstance(chat, dict):
+        memory = chat.get("memory")
+        if isinstance(memory, dict):
+            sqlite_path = memory.get("sqlite_path")
+            if isinstance(sqlite_path, str) and sqlite_path.strip():
+                memory["sqlite_path"] = _resolve_path(sqlite_path, config_dir)
+
+    evaluation = config_data.get("evaluation")
+    if isinstance(evaluation, dict):
+        for key in ("rules_json_path", "jobs_dir", "reports_dir", "log_jsonl_path"):
+            raw = evaluation.get(key)
+            if isinstance(raw, str) and raw.strip():
+                evaluation[key] = _resolve_path(raw, config_dir)
+
 
 def load_agentic_rag_config(config_path: str) -> AgenticRagConfig:
     absolute_config_path = os.path.abspath(config_path)
