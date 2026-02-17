@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { ApiClient } from "./api/client";
+import { ChatApiClient, OpsApiClient } from "./api/client";
 import { ChatPanel } from "./components/ChatPanel";
 import { EmbeddingJobsPanel } from "./components/EmbeddingJobsPanel";
 import { EvaluationPanel } from "./components/EvaluationPanel";
@@ -38,9 +38,18 @@ function parseManualStores(raw: string): string[] {
   return out;
 }
 
+function resolveChatApiBaseUrl(): string {
+  return (import.meta.env.VITE_CHAT_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? "").trim();
+}
+
+function resolveOpsApiBaseUrl(): string {
+  return (import.meta.env.VITE_EMBEDDING_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? "").trim();
+}
+
 
 export default function App() {
-  const client = useMemo(() => new ApiClient(import.meta.env.VITE_API_BASE_URL ?? ""), []);
+  const chatClient = useMemo(() => new ChatApiClient(resolveChatApiBaseUrl()), []);
+  const opsClient = useMemo(() => new OpsApiClient(resolveOpsApiBaseUrl()), []);
 
   const [uiConfig, setUiConfig] = useState<UIConfigResponse>(DEFAULT_UI_CONFIG);
   const [stores, setStores] = useState<string[]>([]);
@@ -49,9 +58,9 @@ export default function App() {
   const [loadingStores, setLoadingStores] = useState(false);
   const [globalError, setGlobalError] = useState("");
 
-  const chat = useChatSession(client, uiConfig.assistant_greeting);
-  const embedding = useEmbeddingJobs(client);
-  const evaluation = useEvaluation(client);
+  const chat = useChatSession(chatClient, uiConfig.assistant_greeting);
+  const embedding = useEmbeddingJobs(opsClient);
+  const evaluation = useEvaluation(opsClient);
 
   const effectiveStores = stores.length ? selectedStores : parseManualStores(manualStoreInput);
 
@@ -59,7 +68,7 @@ export default function App() {
     setLoadingStores(true);
     setGlobalError("");
     try {
-      const nextStores = await client.listStores();
+      const nextStores = await chatClient.listStores();
       setStores(nextStores);
       if (nextStores.length) {
         setSelectedStores((prev) => {
@@ -80,16 +89,16 @@ export default function App() {
   useEffect(() => {
     void (async () => {
       try {
-        await client.health();
+        await chatClient.health();
       } catch (exc) {
         const detail = exc instanceof Error ? exc.message : String(exc);
         setGlobalError(
-          `Backend API is unreachable (${detail}). Start backend: python3 -m chat_module.api --config config.yml`
+          `Chat API is unreachable (${detail}). Start chat service: python3 -m chat_module.api --config config.chat.yml`
         );
         return;
       }
       try {
-        const cfg = await client.getUIConfig();
+        const cfg = await chatClient.getUIConfig();
         setUiConfig(cfg);
       } catch (exc) {
         setGlobalError(exc instanceof Error ? exc.message : String(exc));
@@ -160,8 +169,8 @@ export default function App() {
             onImportRules={evaluation.importRulesFromFile}
             onExportRules={evaluation.exportRulesToFile}
             onStartJob={evaluation.startJob}
-            htmlReportUrl={client.getEvaluationReportHtmlUrl.bind(client)}
-            jsonReportUrl={client.getEvaluationReportJsonUrl.bind(client)}
+            htmlReportUrl={opsClient.getEvaluationReportHtmlUrl.bind(opsClient)}
+            jsonReportUrl={opsClient.getEvaluationReportJsonUrl.bind(opsClient)}
           />
         </aside>
         <main className="content">

@@ -127,3 +127,27 @@ class ChromaStore:
             "documents": response.get("documents") or [],
             "metadatas": response.get("metadatas") or [],
         }
+
+    def delete_ids(self, collection_name: str, ids: List[str]) -> int:
+        cleaned_ids = [item for item in ids if isinstance(item, str) and item.strip()]
+        if not cleaned_ids:
+            return 0
+        col = self.get_or_create(collection_name)
+        before = col.count()
+        col.delete(ids=cleaned_ids)
+        after = col.count()
+        return max(0, before - after)
+
+    def delete_where(self, collection_name: str, where: Dict[str, Any]) -> int:
+        if not where:
+            return 0
+        col = self.get_or_create(collection_name)
+        before = col.count()
+        try:
+            col.delete(where=where)
+            after = col.count()
+            return max(0, before - after)
+        except TypeError:
+            response = col.get(where=where, include=[])
+            ids = response.get("ids") or []
+            return self.delete_ids(collection_name, ids)

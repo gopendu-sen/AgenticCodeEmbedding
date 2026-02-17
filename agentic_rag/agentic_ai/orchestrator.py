@@ -71,6 +71,7 @@ class AgenticRagOrchestrator:
             repo_name=self.repo_name,
             node_text_max_chars=cfg.io_limits.node_text_max_chars,
             embed_doc_max_chars=cfg.io_limits.embed_doc_max_chars,
+            enable_audit_dimensions=cfg.embedding.enable_audit_dimensions,
             verbose_per_node=cfg.logging.embedding_verbose_per_node,
         )
         self.parser = CodeParserService(parser_config=cfg.parser, io_limits=cfg.io_limits)
@@ -128,6 +129,10 @@ class AgenticRagOrchestrator:
         with open(report_path, "w", encoding="utf-8") as handle:
             json.dump(report_payload, handle, ensure_ascii=False, indent=2)
         return report_path
+
+    def _file_hash(self, text: str) -> str:
+        hash_input = f"{self.cfg.parser.index_version}\\n{text}"
+        return sha256_text(hash_input)
 
     def run(self) -> Dict[str, Any]:
         self.embedder.reset_usage()
@@ -197,6 +202,10 @@ class AgenticRagOrchestrator:
         parser_llm_fallback_failures = 0
         parser_llm_fallback_nodes_added = 0
         embedding_flush_failures = 0
+        stale_delete_attempts = 0
+        stale_delete_failures = 0
+        stale_vectors_deleted = 0
+        sqlite_stale_nodes_deleted = 0
         file_reports: List[Dict[str, Any]] = []
         file_report_index: Dict[str, Dict[str, Any]] = {}
 
@@ -289,6 +298,12 @@ class AgenticRagOrchestrator:
                     "queued_nodes": 0,
                     "error": "",
                 },
+                "stale_cleanup": {
+                    "attempted": False,
+                    "vectors_deleted": 0,
+                    "sqlite_nodes_deleted": 0,
+                    "errors": [],
+                },
                 "errors": [],
             }
             file_reports.append(file_report)
@@ -297,7 +312,7 @@ class AgenticRagOrchestrator:
             logger.info("Processing file %d/%d: rel_path=%s ext=%s size=%d", idx, len(files), rf.rel_path, rf.ext, rf.size)
             try:
                 text = self.repo.read_file(rf.rel_path)
-                file_hash = sha256_text(text)
+                file_hash = self._file_hash(text)
 
                 prev_hash = self.sqlite.get_file_hash(rf.rel_path)
                 if prev_hash == file_hash:
@@ -311,6 +326,57 @@ class AgenticRagOrchestrator:
                 file_report["changed"] = True
                 changed_files += 1
                 logger.info("File changed and selected for indexing: %s", rf.rel_path)
+
+                stale_meta = file_report.get("stale_cleanup")
+                if isinstance(stale_meta, dict):
+                    stale_meta["attempted"] = True
+                stale_delete_attempts += 1
+
+                try:
+                    delete_result = self.embedding.delete_vectors_for_file(rf.rel_path)
+                    deleted_vectors = int(delete_result.get("deleted_total", 0))
+                    stale_vectors_deleted += deleted_vectors
+                    if isinstance(stale_meta, dict):
+                        stale_meta["vectors_deleted"] = deleted_vectors
+                    if delete_result.get("errors"):
+                        stale_delete_failures += int(len(delete_result.get("errors", [])))
+                        file_report["partial"] = True
+                        errors = file_report.get("errors")
+                        if isinstance(errors, list):
+                            errors.append("stale_vector_delete_partial_failure")
+                        stale_errors = stale_meta.get("errors") if isinstance(stale_meta, dict) else None
+                        if isinstance(stale_errors, list):
+                            for item in delete_result.get("errors", []):
+                                if isinstance(item, dict):
+                                    stale_errors.append(str(item.get("error", "")))
+                                else:
+                                    stale_errors.append(str(item))
+                except Exception as exc:  # noqa: BLE001
+                    stale_delete_failures += 1
+                    err_text = str(exc)
+                    file_report["partial"] = True
+                    errors = file_report.get("errors")
+                    if isinstance(errors, list):
+                        errors.append(f"stale_vector_delete_failed: {err_text}")
+                    if isinstance(stale_meta, dict):
+                        stale_meta["errors"] = [err_text]
+
+                try:
+                    deleted_sqlite = self.sqlite.delete_nodes_for_file(rf.rel_path)
+                    sqlite_stale_nodes_deleted += deleted_sqlite
+                    if isinstance(stale_meta, dict):
+                        stale_meta["sqlite_nodes_deleted"] = deleted_sqlite
+                except Exception as exc:  # noqa: BLE001
+                    stale_delete_failures += 1
+                    err_text = str(exc)
+                    file_report["partial"] = True
+                    errors = file_report.get("errors")
+                    if isinstance(errors, list):
+                        errors.append(f"sqlite_stale_delete_failed: {err_text}")
+                    stale_errors = stale_meta.get("errors") if isinstance(stale_meta, dict) else None
+                    if isinstance(stale_errors, list):
+                        stale_errors.append(err_text)
+
                 self.sqlite.upsert_file(rf.rel_path, file_hash)
 
                 nodes, conf, lang = self.parser.parse_file(rf.rel_path, text, rf.ext)
@@ -598,6 +664,7 @@ class AgenticRagOrchestrator:
             "repo_path": self.cfg.paths.repo_path,
             "repo_name": self.repo_name,
             "embedding_run_status": run_status,
+            "parser_index_version": self.cfg.parser.index_version,
             "base_url": self.cfg.embedding.base_url,
             "stacks": stacks,
             "frameworks": frameworks,
@@ -613,7 +680,13 @@ class AgenticRagOrchestrator:
             "node_type_counts": dict(sorted(node_type_counts.items(), key=lambda item: item[0])),
             "chroma_counts": self.embedding.counts(),
             "embedding_collection_totals_run": embedding_telemetry.get("collection_totals", {}),
+            "embedding_store_types": embedding_telemetry.get("store_types", {}),
+            "embedding_store_summary": embedding_telemetry.get("store_summary", []),
             "embedding_flush_failures": embedding_flush_failures,
+            "stale_delete_attempts": stale_delete_attempts,
+            "stale_delete_failures": stale_delete_failures,
+            "stale_vectors_deleted": stale_vectors_deleted,
+            "sqlite_stale_nodes_deleted": sqlite_stale_nodes_deleted,
             "security_tags_generated": security_tags_generated,
             "security_tagger_attempts": security_tagger_attempts,
             "security_tagger_failures": security_tagger_failures,
@@ -675,7 +748,9 @@ class AgenticRagOrchestrator:
                 "embedding_model": self.cfg.embedding.model,
                 "embedding_base_url": self.cfg.embedding.base_url,
                 "embedding_batch_size": self.cfg.embedding.batch_size,
+                "embedding_enable_audit_dimensions": self.cfg.embedding.enable_audit_dimensions,
                 "embedding_collections": self.cfg.embedding.collections.model_dump(),
+                "parser_index_version": self.cfg.parser.index_version,
                 "logging_level": self.cfg.logging.level,
                 "embedding_verbose_per_node": self.cfg.logging.embedding_verbose_per_node,
             },

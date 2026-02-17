@@ -1,3 +1,4 @@
+# Chat service config. Query embeddings are resolved through ops service /v1/embeddings.
 paths:
   # Relative paths resolve from this config file directory.
   repo_path: "."
@@ -81,7 +82,7 @@ llm:
 
 embedding:
   #base_url: "http://localhost:8000/v1"
-  base_url: "http://localhost:11434/v1"
+  base_url: "http://127.0.0.1:8006/v1"
   model: "snowflake-arctic-embed:110m"
   timeout_s: 600
   batch_size: 20

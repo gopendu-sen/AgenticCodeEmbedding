@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ApiClient } from "../api/client";
+import { ChatApiClient } from "../api/client";
 import type {
   ChatDoneEvent,
   ChatEvent,
@@ -28,7 +28,7 @@ function greetingMessage(greeting: string): ChatMessage {
 }
 
 
-export function useChatSession(client: ApiClient, assistantGreeting: string) {
+export function useChatSession(client: ChatApiClient, assistantGreeting: string) {
   const [sessionId, setSessionId] = useState<string>(() => newSessionId());
   const [messages, setMessages] = useState<ChatMessage[]>(() => [greetingMessage(assistantGreeting)]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);

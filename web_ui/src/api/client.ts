@@ -9,6 +9,7 @@ import type {
   UIConfigResponse
 } from "../types/api";
 
+
 function parseSSEChunk(chunk: string): ChatEvent | null {
   const lines = chunk
     .split("\n")
@@ -41,7 +42,8 @@ function parseSSEChunk(chunk: string): ChatEvent | null {
   return { event: eventName, ...payload } as ChatEvent;
 }
 
-export class ApiClient {
+
+class BaseApiClient {
   private readonly baseUrl: string;
 
   constructor(baseUrl: string) {
@@ -49,14 +51,14 @@ export class ApiClient {
     this.baseUrl = normalized;
   }
 
-  private url(path: string): string {
+  protected url(path: string): string {
     if (!this.baseUrl) {
       return path;
     }
     return `${this.baseUrl}${path}`;
   }
 
-  private async request(path: string, init: RequestInit = {}, tag = "request"): Promise<Response> {
+  protected async request(path: string, init: RequestInit = {}, tag = "request"): Promise<Response> {
     const method = (init.method ?? "GET").toUpperCase();
     const url = this.url(path);
     const body = typeof init.body === "string" ? init.body : "";
@@ -92,7 +94,10 @@ export class ApiClient {
       throw error;
     }
   }
+}
 
+
+export class ChatApiClient extends BaseApiClient {
   async getUIConfig(): Promise<UIConfigResponse> {
     const response = await this.request("/ui-config", {}, "ui_config");
     if (!response.ok) {
@@ -143,6 +148,93 @@ export class ApiClient {
     }
   }
 
+  async streamChat(
+    body: ChatRequestBody,
+    onEvent: (event: ChatEvent) => void
+  ): Promise<void> {
+    const streamStarted = performance.now();
+    console.info("[REST][stream_start]", {
+      tag: "chat_stream",
+      sessionId: body.session_id,
+      stores: body.store_names,
+      messageChars: body.message.length
+    });
+    const response = await this.request("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }, "chat_stream_open");
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`Chat request failed: ${detail || response.status}`);
+    }
+    if (!response.body) {
+      throw new Error("Chat stream unavailable: missing response body");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let eventCount = 0;
+    let tokenEventCount = 0;
+    let tokenChars = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      let splitIndex = buffer.indexOf("\n\n");
+      while (splitIndex >= 0) {
+        const chunk = buffer.slice(0, splitIndex);
+        buffer = buffer.slice(splitIndex + 2);
+        const event = parseSSEChunk(chunk);
+        if (event) {
+          eventCount += 1;
+          if (event.event === "token") {
+            tokenEventCount += 1;
+            tokenChars += event.token.length;
+          }
+          console.debug("[REST][stream_event]", {
+            tag: "chat_stream",
+            event: event.event,
+            eventCount,
+            tokenEventCount,
+            tokenChars
+          });
+          onEvent(event);
+        }
+        splitIndex = buffer.indexOf("\n\n");
+      }
+    }
+
+    const tail = buffer.trim();
+    if (tail) {
+      const event = parseSSEChunk(tail);
+      if (event) {
+        eventCount += 1;
+        if (event.event === "token") {
+          tokenEventCount += 1;
+          tokenChars += event.token.length;
+        }
+        onEvent(event);
+      }
+    }
+    const elapsedMs = performance.now() - streamStarted;
+    console.info("[REST][stream_done]", {
+      tag: "chat_stream",
+      sessionId: body.session_id,
+      eventCount,
+      tokenEventCount,
+      tokenChars,
+      elapsedMs: Number(elapsedMs.toFixed(2))
+    });
+  }
+}
+
+
+export class OpsApiClient extends BaseApiClient {
   async startEmbeddingJob(repoPath: string, repoName: string): Promise<EmbeddingJob> {
     const response = await this.request("/embedding/jobs", {
       method: "POST",
@@ -230,89 +322,5 @@ export class ApiClient {
 
   getEvaluationReportJsonUrl(jobId: string): string {
     return this.url(`/evaluation/jobs/${encodeURIComponent(jobId)}/json`);
-  }
-
-  async streamChat(
-    body: ChatRequestBody,
-    onEvent: (event: ChatEvent) => void
-  ): Promise<void> {
-    const streamStarted = performance.now();
-    console.info("[REST][stream_start]", {
-      tag: "chat_stream",
-      sessionId: body.session_id,
-      stores: body.store_names,
-      messageChars: body.message.length
-    });
-    const response = await this.request("/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    }, "chat_stream_open");
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`Chat request failed: ${detail || response.status}`);
-    }
-    if (!response.body) {
-      throw new Error("Chat stream unavailable: missing response body");
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let buffer = "";
-    let eventCount = 0;
-    let tokenEventCount = 0;
-    let tokenChars = 0;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      buffer += decoder.decode(value, { stream: true });
-      let splitIndex = buffer.indexOf("\n\n");
-      while (splitIndex >= 0) {
-        const chunk = buffer.slice(0, splitIndex);
-        buffer = buffer.slice(splitIndex + 2);
-        const event = parseSSEChunk(chunk);
-        if (event) {
-          eventCount += 1;
-          if (event.event === "token") {
-            tokenEventCount += 1;
-            tokenChars += event.token.length;
-          }
-          console.debug("[REST][stream_event]", {
-            tag: "chat_stream",
-            event: event.event,
-            eventCount,
-            tokenEventCount,
-            tokenChars
-          });
-          onEvent(event);
-        }
-        splitIndex = buffer.indexOf("\n\n");
-      }
-    }
-
-    const tail = buffer.trim();
-    if (tail) {
-      const event = parseSSEChunk(tail);
-      if (event) {
-        eventCount += 1;
-        if (event.event === "token") {
-          tokenEventCount += 1;
-          tokenChars += event.token.length;
-        }
-        onEvent(event);
-      }
-    }
-    const elapsedMs = performance.now() - streamStarted;
-    console.info("[REST][stream_done]", {
-      tag: "chat_stream",
-      sessionId: body.session_id,
-      eventCount,
-      tokenEventCount,
-      tokenChars,
-      elapsedMs: Number(elapsedMs.toFixed(2))
-    });
   }
 }

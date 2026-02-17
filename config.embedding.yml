@@ -1,3 +1,4 @@
+# Ops service config. Embedding base URL points to upstream embedding provider.
 paths:
   # Relative paths resolve from this config file directory.
   repo_path: "."

@@ -72,6 +72,48 @@ class StoreRetriever:
             "docs": cols.docs,
             "security_tags": cols.security_tags,
             "flows": cols.flows,
+            "audit_identity_profile": cols.audit_identity_profile,
+            "audit_auth_controls": cols.audit_auth_controls,
+            "audit_money_movement": cols.audit_money_movement,
+            "audit_payee_recipient": cols.audit_payee_recipient,
+            "audit_docs_disclosures": cols.audit_docs_disclosures,
+            "audit_limits_access": cols.audit_limits_access,
+        }
+        self.base_collection_keys: List[str] = [
+            "code_symbols",
+            "code_routes",
+            "code_usage",
+            "configs",
+            "docs",
+            "security_tags",
+            "flows",
+        ]
+        self.audit_collection_keys: List[str] = [
+            "audit_identity_profile",
+            "audit_auth_controls",
+            "audit_money_movement",
+            "audit_payee_recipient",
+            "audit_docs_disclosures",
+            "audit_limits_access",
+        ]
+        self.rule_dimension_preferences: Dict[str, List[str]] = {
+            "A": ["audit_identity_profile"],
+            "B": ["audit_identity_profile"],
+            "C": ["audit_docs_disclosures"],
+            "D": ["audit_auth_controls"],
+            "E": ["audit_identity_profile"],
+            "F": ["audit_identity_profile"],
+            "G": ["audit_identity_profile", "audit_auth_controls"],
+            "H": ["audit_identity_profile", "audit_auth_controls"],
+            "I1": ["audit_money_movement"],
+            "I2": ["audit_money_movement", "audit_payee_recipient"],
+            "J": ["audit_money_movement"],
+            "K": ["audit_money_movement", "audit_payee_recipient"],
+            "L": ["audit_money_movement", "audit_payee_recipient"],
+            "M": ["audit_identity_profile", "audit_auth_controls"],
+            "N": ["audit_money_movement"],
+            "O": ["audit_limits_access", "audit_auth_controls"],
+            "P": ["audit_limits_access", "audit_auth_controls"],
         }
 
     @classmethod
@@ -207,6 +249,19 @@ class StoreRetriever:
         base = total // buckets
         remainder = total % buckets
         return [base + (1 if idx < remainder else 0) for idx in range(buckets)]
+
+    def _evaluation_preferred_limits(self, rule_id: str) -> Dict[str, int]:
+        preferred = self.rule_dimension_preferences.get(rule_id, [])
+        budget = max(2, self.cfg.chat.retrieval.base_top_k * 2)
+        limits: Dict[str, int] = {}
+        for key in preferred:
+            if key in self.collection_map:
+                limits[key] = budget
+        return limits
+
+    def _evaluation_base_limits(self) -> Dict[str, int]:
+        budget = max(1, self.cfg.chat.retrieval.base_top_k)
+        return {key: budget for key in self.base_collection_keys if key in self.collection_map}
 
     @staticmethod
     def _query_terms(query: str) -> List[str]:
@@ -475,13 +530,30 @@ class StoreRetriever:
         job_id = str(job.get("job_id", "")).strip()
         if not job_id:
             raise ValueError("Embedding job payload missing job_id")
+        job = self._normalize_embedding_job(job)
         path = self._job_status_path(job_id)
         tmp_path = path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as handle:
             json.dump(job, handle, ensure_ascii=False, indent=2)
         os.replace(tmp_path, path)
 
+    def _normalize_embedding_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(job)
+        now = self._utc_now()
+        payload["job_id"] = str(payload.get("job_id", "")).strip()
+        payload["status"] = str(payload.get("status", "starting") or "starting")
+        payload["stage"] = str(payload.get("stage", "init") or "init")
+        payload["started_at_utc"] = str(payload.get("started_at_utc", "") or payload.get("created_at_utc", "") or now)
+        payload["finished_at_utc"] = str(payload.get("finished_at_utc", "") or "")
+        payload["updated_at_utc"] = str(payload.get("updated_at_utc", "") or now)
+        payload["error"] = str(payload.get("error", "") or "")
+        payload["partial"] = bool(payload.get("partial", False))
+        if "summary" not in payload:
+            payload["summary"] = None
+        return payload
+
     def _refresh_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        job = self._normalize_embedding_job(job)
         status = str(job.get("status", "")).strip().lower()
         pid_raw = job.get("pid")
         try:
@@ -489,13 +561,17 @@ class StoreRetriever:
         except (TypeError, ValueError):
             pid = 0
 
-        if status != "running":
+        if status in {"completed", "completed_partial", "failed"}:
             return job
 
-        if pid > 0 and self._is_pid_alive(pid):
+        if status == "starting":
+            return job
+
+        if status == "running" and pid > 0 and self._is_pid_alive(pid):
             return job
 
         job["status"] = "failed"
+        job["stage"] = "failed"
         if not str(job.get("error", "")).strip():
             job["error"] = "Embedding worker process exited unexpectedly"
         if not str(job.get("finished_at_utc", "")).strip():
@@ -518,14 +594,18 @@ class StoreRetriever:
         job = {
             "job_id": job_id,
             "status": "starting",
+            "stage": "init",
             "repo_name": clean_repo_name,
             "repo_path": resolved_repo_path,
             "config_path": self.config_path,
             "created_at_utc": created_at,
+            "started_at_utc": created_at,
+            "finished_at_utc": "",
             "updated_at_utc": created_at,
             "pid": None,
             "summary": None,
             "error": "",
+            "partial": False,
             "report_path": "",
             "log_path": self._job_log_path(job_id),
         }
@@ -571,6 +651,7 @@ class StoreRetriever:
                 err_text,
             )
             job["status"] = "failed"
+            job["stage"] = "failed"
             job["error"] = f"Failed to spawn embedding worker: {err_text}"
             job["pid"] = None
             job["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
@@ -581,6 +662,7 @@ class StoreRetriever:
             return job
 
         job["status"] = "running"
+        job["stage"] = "init"
         job["pid"] = process.pid
         job["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
         self._write_job(job)
@@ -1180,6 +1262,9 @@ class StoreRetriever:
         })
 
         for rule in rules:
+            rule_id = str(rule.get("id", "")).strip()
+            preferred_limits = self._evaluation_preferred_limits(rule_id)
+            base_limits = self._evaluation_base_limits()
             queries = [
                 f"{rule.get('title', '')}\n{rule.get('definition', '')}".strip(),
                 " ".join(rule.get("strong_signals", [])),
@@ -1191,11 +1276,31 @@ class StoreRetriever:
             for query in queries:
                 if not query.strip():
                     continue
+                sources: List[Dict[str, Any]] = []
+                if preferred_limits:
+                    try:
+                        preferred_sources, _ = self.retrieve(
+                            query,
+                            [clean_repo_name],
+                            collection_limits=preferred_limits,
+                            intent_override=f"evaluation_{rule_id}_preferred",
+                        )
+                        sources.extend(preferred_sources)
+                    except Exception as exc:  # noqa: BLE001
+                        retrieval_failures.append(f"preferred:{exc}")
+
                 try:
-                    sources, _ = self.retrieve(query, [clean_repo_name])
+                    base_sources, _ = self.retrieve(
+                        query,
+                        [clean_repo_name],
+                        collection_limits=base_limits,
+                        intent_override=f"evaluation_{rule_id}_base",
+                    )
+                    sources.extend(base_sources)
                 except Exception as exc:  # noqa: BLE001
-                    retrieval_failures.append(str(exc))
+                    retrieval_failures.append(f"base:{exc}")
                     continue
+
                 for src in sources:
                     meta = src.get("metadata") or {}
                     key = "|".join(
@@ -1464,7 +1569,13 @@ class StoreRetriever:
         logger.info("Store discovery completed: discovered=%d", len(out))
         return out
 
-    def retrieve(self, query: str, store_names: List[str]) -> Tuple[List[Dict[str, Any]], str]:
+    def retrieve(
+        self,
+        query: str,
+        store_names: List[str],
+        collection_limits: Optional[Dict[str, int]] = None,
+        intent_override: str = "",
+    ) -> Tuple[List[Dict[str, Any]], str]:
         normalized_stores = self._normalize_store_names(store_names)
         if not normalized_stores:
             raise ValueError("store_names must contain at least one non-empty repo tag")
@@ -1476,8 +1587,19 @@ class StoreRetriever:
         )
 
         query_vector = self.embedder.embed([query])[0]
-        intent = self._detect_query_intent(query)
-        weighted_limits = self._weighted_limits(intent)
+        if collection_limits is None:
+            intent = intent_override.strip() or self._detect_query_intent(query)
+            weighted_limits = self._weighted_limits(intent)
+        else:
+            intent = intent_override.strip() or "manual"
+            weighted_limits = {}
+            for key, value in collection_limits.items():
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if parsed > 0:
+                    weighted_limits[key] = parsed
         ranked: List[Dict[str, Any]] = []
         debug_collections: Dict[str, Any] = {}
 

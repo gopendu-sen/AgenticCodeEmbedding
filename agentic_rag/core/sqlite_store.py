@@ -84,5 +84,12 @@ class SQLiteStore:
         ))
         self.conn.commit()
 
+    def delete_nodes_for_file(self, file_path: str) -> int:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM nodes WHERE file_path = ?", (file_path,))
+        deleted = int(cur.rowcount if cur.rowcount is not None else 0)
+        self.conn.commit()
+        return max(0, deleted)
+
     def close(self):
         self.conn.close()

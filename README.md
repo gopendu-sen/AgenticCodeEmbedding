@@ -5,8 +5,9 @@ It indexes source code into Chroma with repo tags, then serves citation-grounded
 
 ## What Is In This Repo
 - `agentic_rag/`: ingestion pipeline (parser, orchestrator, embedding, config).
-- `retreiving_module/`: designated retrieval layer and embedding-job orchestration (`StoreRetriever`).
-- `chat_module/`: FastAPI API layer + persistent chat session memory (SQLite).
+- `retreiving_module/`: designated retrieval layer + job orchestration (`StoreRetriever`).
+- `chat_module/`: chat/session FastAPI API layer + persistent chat session memory (SQLite).
+- `ops_module/`: embedding/evaluation FastAPI API layer + embedding proxy (`/v1/embeddings`).
 - `web_ui/`: React + Vite + TypeScript frontend.
 
 ## Core Capabilities
@@ -15,24 +16,71 @@ It indexes source code into Chroma with repo tags, then serves citation-grounded
 - Security/audit node tagging (`auth_guard`, `policy_check`, `audit_log`, `sensitive_op`).
 - Repo-tagged embeddings (`metadata.repo_name`) for multi-repo isolation.
 - Retrieval intent routing across split collections:
-  - `code_symbols`, `code_routes`, `code_usage`, `configs`, `docs`, `security_tags`, `flows`.
+  - Base stores: `code_symbols`, `code_routes`, `code_usage`, `configs`, `docs`, `security_tags`, `flows`
+  - Audit-dimension stores: `audit_identity_profile`, `audit_auth_controls`, `audit_money_movement`,
+    `audit_payee_recipient`, `audit_docs_disclosures`, `audit_limits_access`
 - Chat responses with strict source citations (`[1]`, `[2]`, ...).
 - Persistent chat memory in SQLite.
 - Background embedding jobs with JSON status + logs.
 - Background evaluation jobs with HTML + JSON audit reports.
 - Retrieval and ingestion audit logs in `reports/`.
+- Built-in retry for LLM REST failures (timeouts/connection errors/retryable HTTP status codes).
 
 ## Runtime Architecture
 ```text
-config.yml
-  -> agentic_rag.core.config_loader.load_agentic_rag_config
-  -> chat_module.api (FastAPI)
-       -> retreiving_module.StoreRetriever
-            -> ChromaStore + EmbeddingClient + LLMClient
+config.chat.yml
+  -> chat_module.api (FastAPI :8005)
+       -> retreiving_module.StoreRetriever (retrieval + store discovery)
+            -> ChromaStore + EmbeddingClient(base_url=http://127.0.0.1:8006/v1)
        -> SessionService/SessionStore (SQLite memory)
+config.embedding.yml
+  -> ops_module.api (FastAPI :8006)
+       -> retreiving_module.StoreRetriever (embedding/evaluation jobs + rules)
+       -> /v1/embeddings passthrough to upstream embedding provider
   -> web_ui (React SPA)
-       -> REST + SSE calls to FastAPI
+       -> chat REST + SSE to chat service
+       -> embedding/evaluation REST to ops service
 ```
+
+## Architecture Details
+- Chat service (`chat_module`) owns conversational APIs only:
+  - `/chat` SSE streaming
+  - session/history lifecycle
+  - UI config and store discovery for the UI
+- Ops service (`ops_module`) owns operational APIs:
+  - embedding jobs
+  - evaluation rules + evaluation jobs + reports
+  - OpenAI-compatible embeddings proxy (`POST /v1/embeddings`)
+- Data stores are shared between services:
+  - Chroma (`paths.chroma_dir`) for vector data
+  - SQLite (`paths.sqlite_path`) for file/node metadata
+  - `reports/` for ingestion/evaluation/job status artifacts
+- Embedding flow split:
+  - chat retrieval embeds the query through `EmbeddingClient -> ops /v1/embeddings`
+  - ops `/v1/embeddings` forwards to upstream embedding provider
+  - no direct chat fallback to upstream provider if ops is down (fail-fast)
+
+## How It Works
+1. You run an embedding job from ops UI/API.
+2. Orchestrator scans selected repository files and parses them into nodes.
+3. Before re-indexing a changed file, stale vectors and stale SQLite nodes for that file are deleted.
+4. Nodes are routed to one or many embedding stores (base + audit dimensions).
+5. Vectors are upserted to Chroma with `repo_name` and file metadata.
+6. Chat queries run against weighted stores filtered by selected repo tags.
+7. Retrieved evidence is sent to the LLM with citation constraints and streamed back via SSE.
+8. Evaluation jobs use the same retrieval system but rule-aware dimension preferences first.
+
+## Working Flow (Runtime)
+1. User starts embedding job (`/embedding/jobs`) from UI or API.
+2. Worker process updates `reports/embedding_jobs/<job_id>.json` through stages:
+   - `init` -> `config_loaded` -> `orchestrator_running` -> terminal (`completed`, `completed_partial`, `failed`)
+3. Orchestrator writes ingestion report with per-store summary:
+   - `summary.embedding_store_types`
+   - `summary.embedding_store_summary[]`
+   - `summary.parser_index_version`
+4. User opens chat; chat service retrieves with intent weights and repo filtering.
+5. If chat/eval LLM service call fails due retryable transport/server issue, client retries automatically.
+6. User can run evaluation job; report JSON/HTML is generated under `reports/evaluations/`.
 
 ## Data Outputs
 - Metadata DB: `paths.sqlite_path`
@@ -41,10 +89,17 @@ config.yml
 - Embedding jobs:
   - status: `paths.reports_dir/embedding_jobs/<job_id>.json`
   - worker log: `paths.reports_dir/embedding_jobs/<job_id>.log`
+  - status fields:
+    - `status`: `starting | running | completed | completed_partial | failed`
+    - `stage`: `init | config_loaded | orchestrator_running | completed | failed`
+    - terminal timestamps are always written (`started_at_utc`, `finished_at_utc`, `updated_at_utc`) even on failures
   - per-file outcomes:
     - `files[]` with status values: `success`, `success_with_llm`, `error`, `failed`, `skipped_unchanged`
     - `partial=true` when file had partial processing (for example deterministic success with LLM/security errors)
     - `file_status_counts` rollup and top-level job status `completed` or `completed_partial`
+  - report summary includes per-store outcome metrics:
+    - `embedding_store_summary[]` (`store_key`, `store_type`, queued/upserted/deleted/final counts, status, error)
+    - `embedding_store_types` (`base_stores[]`, `audit_dimension_stores[]`)
 - Retrieval log: `paths.reports_dir/retrieve_log.jsonl`
 - Evaluation jobs:
   - status: `evaluation.jobs_dir/<job_id>.json`
@@ -70,35 +125,45 @@ cd ..
 ```
 
 ## Run (Step by Step)
-1. Configure `config.yml`:
-- `paths.repo_path`, `paths.chroma_dir`, `paths.reports_dir`
-- `llm.base_url`, `llm.model`
-- `embedding.base_url`, `embedding.model`
-- `evaluation.rules_json_path`, `evaluation.jobs_dir`, `evaluation.reports_dir`, `evaluation.log_jsonl_path`
-- `chat.api.host`, `chat.api.port`, `chat.api.cors_allowed_origins`
-- `chat.memory.sqlite_path`
+1. Keep `config.yml` for backward compatibility, then use split configs:
+- `config.chat.yml`: chat service config (with `embedding.base_url: "http://127.0.0.1:8006/v1"`).
+  - Chat bind settings are driven by YAML: `chat.api.host` and `chat.api.port`.
+- `config.embedding.yml`: ops service config (with upstream embedding provider in `embedding.base_url`).
 
-2. Start backend:
+2. Start ops service (embedding/evaluation + `/v1/embeddings` proxy):
 ```bash
-python3 -m chat_module.api --config config.yml
+python3 -m ops_module.api --config config.embedding.yml --port 8006
 ```
-`chat_module` loads endpoint/runtime settings from `config.yml` (`chat.api.*`, `llm.*`, `embedding.*`, `chat.memory.*`).
 
-3. Start frontend:
+3. Start chat service:
+```bash
+python3 -m chat_module.api --config config.chat.yml
+```
+
+4. Start frontend:
 ```bash
 cd web_ui
 npm run dev
 ```
-Vite proxy target defaults to `http://127.0.0.1:8005`.
-You can still override proxy target explicitly:
-```bash
-VITE_PROXY_TARGET=http://127.0.0.1:8005 npm run dev
-```
+Vite proxy defaults:
+- chat target: `http://127.0.0.1:8005`
+- ops target: `http://127.0.0.1:8006`
 
-4. Open UI:
+Optional overrides:
+```bash
+VITE_CHAT_PROXY_TARGET=http://127.0.0.1:8005 \
+VITE_EMBEDDING_PROXY_TARGET=http://127.0.0.1:8006 \
+npm run dev
+```
+Legacy `VITE_PROXY_TARGET` is still supported for chat proxy fallback.
+Frontend API base envs (optional):
+- `VITE_CHAT_API_BASE_URL` (fallback: `VITE_API_BASE_URL`)
+- `VITE_EMBEDDING_API_BASE_URL` (fallback: `VITE_API_BASE_URL`)
+
+5. Open UI:
 - `http://localhost:5173`
 
-5. Start embedding from GUI:
+6. Start embedding from GUI:
 - In **Embedding Jobs** panel:
   - set `Repo path` (absolute/local path to code repo)
   - set `Repo store tag` (repo name used for retrieval filtering)
@@ -107,7 +172,7 @@ VITE_PROXY_TARGET=http://127.0.0.1:8005 npm run dev
 - Click `Refresh` in **Embedding Jobs** to check progress.
 - After completion, click `Refresh` in **Repo Stores**.
 
-6. Start evaluation report from GUI:
+7. Start evaluation report from GUI:
 - In **Evaluation Reports** panel:
   - select one `Repo store` (or type one when discovery is empty)
   - set required `Repo path`
@@ -122,7 +187,7 @@ VITE_PROXY_TARGET=http://127.0.0.1:8005 npm run dev
   - `Save` to persist edits
   - `Import`/`Export` for JSON file exchange
 
-7. Chat:
+8. Chat:
 - Select at least one repo store in **Repo Stores** (or manual fallback if discovery is empty).
 - Ask your question.
 - Sources panel shows citation-to-source mapping (repo, file, line range, node type, collection, distance).
@@ -130,7 +195,7 @@ VITE_PROXY_TARGET=http://127.0.0.1:8005 npm run dev
 ## Optional CLI Ingestion
 Use this if you want direct ingestion outside UI jobs:
 ```bash
-python3 ingest.py --config config.yml --repo-name <repo_store_tag>
+python3 ingest.py --config config.embedding.yml --repo-name <repo_store_tag>
 ```
 
 `--repo-name` is required and becomes `metadata.repo_name` on all embedded records.
@@ -154,7 +219,50 @@ No-source behavior:
 - If no chunks are retrieved, backend returns deterministic no-source guidance and sets `no_sources=true`.
 - This prevents generic “I cannot access repo” model replies.
 
-## FastAPI Endpoints
+## How Rule-Driven Audit Works
+The audit engine is rule-first and evidence-driven.
+
+### Rule Source
+- Rules are loaded from `retreiving_module/default_evaluation_rules.json` (or configured rules path).
+- Contract per rule item:
+  - `id`, `title`, `definition`
+  - `strong_signals[]`
+  - `weak_signals[]`
+  - `false_positives[]`
+
+### Candidate Retrieval Strategy
+For each rule:
+1. Build three retrieval prompts:
+   - title + definition
+   - joined strong signals
+   - joined weak signals
+2. Query preferred audit dimensions first (rule-id mapping), then base dimensions fallback.
+3. Deduplicate candidates by `(file_path,start_line,end_line,node_type)`.
+4. Score candidates using:
+   - strong-signal hit count
+   - weak-signal hit count
+   - vector distance
+5. Keep top-N candidates and extract bounded evidence snippets.
+
+### Decisioning
+- Signal hits are recomputed on selected evidences.
+- LLM adjudicates each rule into one status:
+  - `Detected`
+  - `Not Detected`
+  - `Needs Review`
+- If LLM decision fails, item is marked `Needs Review` with failure reason (partial run).
+
+### Outputs
+- Per-rule output includes:
+  - status, reason, confidence
+  - matched strong/weak/false-positive signal lists
+  - evidence snippets with citation ids
+- Job-level outputs include:
+  - summary status counts
+  - total candidates
+  - JSON + HTML reports for auditor and machine workflows
+
+## Chat FastAPI Endpoints
 - `GET /health`
 - `GET /ui-config`
 - `GET /stores`
@@ -162,6 +270,10 @@ No-source behavior:
 - `GET /sessions`
 - `GET /history/{session_id}`
 - `DELETE /sessions/{session_id}`
+
+## Ops FastAPI Endpoints
+- `GET /health`
+- `GET /stores`
 - `POST /embedding/jobs`
 - `GET /embedding/jobs?limit=N`
 - `GET /embedding/jobs/{job_id}`
@@ -172,6 +284,7 @@ No-source behavior:
 - `GET /evaluation/jobs/{job_id}`
 - `GET /evaluation/jobs/{job_id}/html`
 - `GET /evaluation/jobs/{job_id}/json`
+- `POST /v1/embeddings`
 
 ### `/chat` SSE Events
 - `meta`: intent, selected stores, initial sources
@@ -191,17 +304,39 @@ Behavior:
   - `chat.memory.enable_summarisation`
   - `chat.memory.enable_intent_tracking`
 
-## Embedding Node Routing
-- `code_symbols`: `function`, `class`, `component`, `table`, `view`, `query`, `notebook_code`
-- `code_routes`: `route`, `entrypoint`
-- `code_usage`: `call_edge`, `import_usage`
-- `configs`: `config`
-- `docs`: `doc`, `doc_code`, `comment_line`, `comment_block`, `comment_doc`, `comment_other`
-- `security_tags`: `auth_guard`, `policy_check`, `audit_log`, `sensitive_op`
-- `flows`: `flow_chain` (reserved/phase-2)
+## Embedding Dimensions
+This release uses 13 dimensions: 7 base stores + 6 audit-dimension stores.
 
+### Base Stores
+- `code_symbols`: symbols and definitions (`function`, `class`, `table`, `query`, `notebook_code`)
+- `code_routes`: routes and entrypoints
+- `code_usage`: call edges/import usage
+- `configs`: config-like nodes (`.yml/.yaml/.json/.toml/.ini/.xml/.properties`)
+- `docs`: docs/markdown/comments/doc-code chunks
+- `security_tags`: `auth_guard`, `policy_check`, `audit_log`, `sensitive_op`
+- `flows`: flow-chain nodes
+
+### Audit-Dimension Stores
+- `audit_identity_profile`: customer/profile/PII/identity/account-linking signals
+- `audit_auth_controls`: password/PIN/MFA/device/unlock/block-auth controls
+- `audit_money_movement`: transfer/payment rails/arrangements/collections movement signals
+- `audit_payee_recipient`: payee/beneficiary/recipient lifecycle signals
+- `audit_docs_disclosures`: e-sign/document/disclosure/statement signals
+- `audit_limits_access`: block/unblock/freeze/limit-up-down/access restoration signals
+
+### Multi-Destination Routing
+- A single node can be embedded into multiple stores.
+- Base routing is always applied when node type matches.
+- Audit-dimension routing is lexical + metadata-driven for high recall.
+
+### Embedded Metadata and Text Enrichment
 Each vector metadata includes:
-- `repo_name`, `file_path`, `start_line`, `end_line`, `node_type`, `language`, `symbol`, `confidence`
+- `repo_name`, `file_path`, `start_line`, `end_line`, `node_type`, `language`, `symbol`, `confidence`, `store_key`
+
+Embedding text payload is enriched with selected metadata when present:
+- `framework`, `annotations`, `attributes`, `sql_kind`, `sql_op`, `import_kind`, `entrypoint_kind`
+- document section metadata (`section_*`, `doc_title`, `doc_format`, `code_language`)
+- comment classification (`comment_kind`)
 
 ## Logging and Reports
 - Retrieval logs: `reports/retrieve_log.jsonl`
@@ -219,12 +354,15 @@ Each vector metadata includes:
   - `reports/evaluation_log.jsonl`
 - REST/API logging is verbose by design:
   - backend logs inbound REST request start/end, status, latency, and key request metadata
-  - backend logs outbound LLM/embedding REST call start/end, status, latency, and token usage when available
+  - backend logs outbound LLM/embedding REST call start/end, status, latency, retry attempts, and token usage when available
   - frontend logs REST and SSE stream lifecycle in browser devtools console
 - Ingestion report JSON includes summary metrics, collection totals, node-type totals, and token usage sections.
 
 ## Config Rules
-- Source of truth: `config.yml`
+- Source configs:
+  - `config.yml` (legacy single-service compatible)
+  - `config.chat.yml` (chat service)
+  - `config.embedding.yml` (ops service)
 - Env overrides: `AGENTIC_RAG__...` keys only
 - Relative `paths.*`, `chat.memory.sqlite_path`, and `evaluation.*` path fields resolve relative to config file directory
 
@@ -242,20 +380,22 @@ Each vector metadata includes:
 
 2. `ModuleNotFoundError: fastapi`:
 - install Python dependencies: `pip install -r requirements.txt`
-- ensure you are in the same Python env used to run backend
+- ensure you are in the same Python env used to run both services
 
 3. CORS errors from browser:
-- add frontend origin to `chat.api.cors_allowed_origins` in `config.yml`
+- add frontend origin to `chat.api.cors_allowed_origins` in both `config.chat.yml` and `config.embedding.yml`
 
 4. Old/generic answers without citations:
 - verify retrieval source count in `retrieve_log.jsonl`
 - if `source_count=0`, re-embed repo and retry
 
-5. Vite proxy `ECONNREFUSED` (for `/ui-config`, `/stores`, `/sessions`, `/embedding/jobs`, `/evaluation/*`):
-- backend is not reachable on `127.0.0.1:8005`
-- start backend first:
+5. Vite proxy `ECONNREFUSED`:
+- chat routes (`/ui-config`, `/stores`, `/sessions`, `/chat`) require chat service on `127.0.0.1:8005`
+- ops routes (`/embedding/*`, `/evaluation/*`, `/v1/embeddings`) require ops service on `127.0.0.1:8006`
+- start both services:
 ```bash
-python3 -m chat_module.api --config config.yml
+python3 -m ops_module.api --config config.embedding.yml --port 8006
+python3 -m chat_module.api --config config.chat.yml
 ```
 - then start/restart frontend:
 ```bash
@@ -270,3 +410,9 @@ npm run dev
   - `reports/evaluation_jobs/<job_id>.json`
   - `reports/evaluation_jobs/<job_id>.log`
   - `reports/evaluation_log.jsonl`
+
+7. Chat/evaluation LLM call still fails after retries:
+- check upstream LLM endpoint health and credentials
+- check network reachability from backend process host
+- check logs for `attempt=<n>/<total>` retry messages in backend output
+- increase `llm.timeout_s` if responses are timing out under load

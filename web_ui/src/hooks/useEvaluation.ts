@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 
-import { ApiClient } from "../api/client";
+import { OpsApiClient } from "../api/client";
 import type { EvaluationJob, EvaluationRulesPayload } from "../types/api";
 
 
@@ -16,7 +16,7 @@ function ensureRulesPayload(value: unknown): EvaluationRulesPayload {
 }
 
 
-export function useEvaluation(client: ApiClient) {
+export function useEvaluation(client: OpsApiClient) {
   const [jobs, setJobs] = useState<EvaluationJob[]>([]);
   const [rules, setRules] = useState<EvaluationRulesPayload | null>(null);
   const [rulesText, setRulesText] = useState<string>("");

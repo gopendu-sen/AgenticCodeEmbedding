@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from agentic_rag.code_parser.deterministic import (
     CobolParser,
@@ -73,27 +73,61 @@ class CodeParserService:
             max_callees_per_scope=self.max_callees_per_scope,
         )
 
+    def _chunked_doc_fallback(
+        self,
+        rel_path: str,
+        text: str,
+        lang: str,
+        metadata: Dict[str, str],
+        confidence: float,
+    ) -> Tuple[List[CodeNode], float, str]:
+        nodes, _ = parse_docs(
+            rel_path,
+            text,
+            chunk_lines=self.parser_config.docs.chunk_lines,
+            overlap=self.parser_config.docs.overlap_lines,
+        )
+        if not nodes:
+            lines = text.splitlines()
+            node = CodeNode(
+                node_id=f"doc::{rel_path}::1-{max(1, len(lines))}",
+                node_type="doc",
+                language=lang if lang != "unknown" else "text",
+                file_path=rel_path,
+                start_line=1,
+                end_line=max(1, len(lines)),
+                symbol=None,
+                text=text[: self.node_text_max_chars],
+                metadata=dict(metadata),
+                confidence=confidence,
+            ).finalize()
+            return [node], confidence, lang
+
+        for node in nodes:
+            merged_meta = dict(node.metadata or {})
+            merged_meta.update(metadata)
+            node.metadata = merged_meta
+            if lang != "unknown":
+                node.language = lang
+            node.confidence = confidence
+
+        return nodes, confidence, lang
+
     def _parser_error_fallback(self, rel_path: str, text: str, lang: str, parser_name: str, error: Exception) -> Tuple[
         List[CodeNode], float, str]:
-        lines = text.splitlines()
         fallback_confidence = min(self.parser_config.generic.fallback_confidence, 0.1)
-        node = CodeNode(
-            node_id=f"file::{rel_path}",
-            node_type="file",
-            language=lang,
-            file_path=rel_path,
-            start_line=1,
-            end_line=max(1, len(lines)),
-            symbol=None,
-            text=text[:self.node_text_max_chars],
+        return self._chunked_doc_fallback(
+            rel_path=rel_path,
+            text=text,
+            lang=lang,
             metadata={
                 "parse_error": "exception",
                 "parser": parser_name,
                 "parse_error_detail": str(error)[:240],
+                "fallback_mode": "parser_error_chunked_docs",
             },
             confidence=fallback_confidence,
-        ).finalize()
-        return [node], fallback_confidence, lang
+        )
 
     def parse_file(self, rel_path: str, text: str, ext: str) -> Tuple[List[CodeNode], float, str]:
         lang = language_hint_from_ext(ext)
@@ -152,7 +186,7 @@ class CodeParserService:
                 )
                 return nodes, conf, lang
 
-            if ext == ".txt":
+            if ext in (".txt", ".html", ".htm", ".xhtml", ".jsp", ".jspx", ".cshtml"):
                 nodes, conf = parse_docs(
                     rel_path,
                     text,
@@ -172,7 +206,7 @@ class CodeParserService:
                 )
                 return nodes, conf, lang
 
-            if ext in (".yml", ".yaml", ".json", ".toml", ".ini"):
+            if ext in (".yml", ".yaml", ".json", ".toml", ".ini", ".xml", ".properties"):
                 nodes, conf = parse_config(
                     rel_path,
                     text,
@@ -181,21 +215,17 @@ class CodeParserService:
                 )
                 return nodes, conf, lang
 
-            lines = text.splitlines()
             fallback_confidence = self.parser_config.generic.fallback_confidence
-            nodes = [CodeNode(
-                node_id=f"file::{rel_path}",
-                node_type="file",
-                language=lang,
-                file_path=rel_path,
-                start_line=1,
-                end_line=max(1, len(lines)),
-                symbol=None,
-                text=text[:self.node_text_max_chars],
-                metadata={"note": "no deterministic parser"},
+            return self._chunked_doc_fallback(
+                rel_path=rel_path,
+                text=text,
+                lang=lang,
+                metadata={
+                    "fallback_mode": "unknown_extension_chunked_docs",
+                    "note": "no deterministic parser",
+                },
                 confidence=fallback_confidence,
-            ).finalize()]
-            return nodes, fallback_confidence, lang
+            )
         except Exception as exc:  # noqa: BLE001
             parser_name = f"{lang or 'unknown'}:{ext or 'unknown'}"
             return self._parser_error_fallback(

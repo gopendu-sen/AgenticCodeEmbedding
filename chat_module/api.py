@@ -1,17 +1,16 @@
-"""FastAPI backend for chat + retrieval + embedding job orchestration."""
+"""FastAPI backend for chat streaming + session management + store discovery."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import os
 import time
 from typing import Any, Dict, Iterator, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 import uvicorn
 
@@ -53,63 +52,6 @@ class ChatRequest(BaseModel):
         if not cleaned:
             raise ValueError("store_names must contain at least one non-empty value")
         return cleaned
-
-
-class EmbeddingJobRequest(BaseModel):
-    repo_path: str
-    repo_name: str
-
-    @field_validator("repo_path", "repo_name")
-    @classmethod
-    def _not_empty(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("field must not be empty")
-        return cleaned
-
-
-class EvaluationJobRequest(BaseModel):
-    repo_path: str
-    repo_name: str
-
-    @field_validator("repo_path", "repo_name")
-    @classmethod
-    def _not_empty(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("field must not be empty")
-        return cleaned
-
-
-class EvaluationRuleRequest(BaseModel):
-    id: str
-    title: str
-    definition: str
-    strong_signals: List[str]
-    weak_signals: List[str]
-    false_positives: List[str]
-
-    @field_validator("id", "title", "definition")
-    @classmethod
-    def _required_text(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("field must not be empty")
-        return cleaned
-
-    @field_validator("strong_signals", "weak_signals", "false_positives")
-    @classmethod
-    def _required_text_list(cls, values: List[str]) -> List[str]:
-        cleaned = [str(item).strip() for item in values if str(item).strip()]
-        if not cleaned:
-            raise ValueError("list must contain at least one non-empty value")
-        return cleaned
-
-
-class EvaluationRulesRequest(BaseModel):
-    version: int = Field(..., ge=1)
-    updated_at_utc: Optional[str] = None
-    items: List[EvaluationRuleRequest] = Field(..., min_length=1)
 
 
 def _build_session_service(cfg: AgenticRagConfig) -> SessionService:
@@ -210,162 +152,6 @@ def create_app(cfg: AgenticRagConfig, *, config_path: str) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Store discovery failed")
             raise HTTPException(status_code=500, detail=f"Store discovery failed: {exc}") from exc
-
-    @app.post("/embedding/jobs")
-    async def start_embedding_job(request: EmbeddingJobRequest) -> Dict[str, Any]:
-        logger.info(
-            "REST /embedding/jobs called: repo_name=%s repo_path=%s",
-            request.repo_name,
-            request.repo_path,
-        )
-        try:
-            job = retriever.start_embedding_job(request.repo_path, request.repo_name)
-            logger.info(
-                "REST /embedding/jobs started: job_id=%s status=%s repo_name=%s",
-                job.get("job_id"),
-                job.get("status"),
-                job.get("repo_name"),
-            )
-            return job
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to start embedding job")
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.get("/embedding/jobs")
-    async def list_embedding_jobs(limit: int = Query(default=20, ge=1, le=200)) -> Dict[str, Any]:
-        logger.info("REST /embedding/jobs called: limit=%d", limit)
-        try:
-            jobs = retriever.list_embedding_jobs(limit=limit)
-            logger.info("REST /embedding/jobs completed: returned=%d", len(jobs))
-            return {"jobs": jobs}
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to list embedding jobs")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    @app.get("/embedding/jobs/{job_id}")
-    async def get_embedding_job(job_id: str) -> Dict[str, Any]:
-        logger.info("REST /embedding/jobs/{job_id} called: job_id=%s", job_id)
-        try:
-            job = retriever.get_embedding_job(job_id)
-            logger.info(
-                "REST /embedding/jobs/{job_id} completed: job_id=%s status=%s",
-                job_id,
-                job.get("status"),
-            )
-            return job
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to fetch embedding job: job_id=%s", job_id)
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.get("/evaluation/rules")
-    async def get_evaluation_rules() -> Dict[str, Any]:
-        logger.info("REST /evaluation/rules called")
-        try:
-            payload = retriever.get_evaluation_rules()
-            logger.info(
-                "REST /evaluation/rules completed: version=%s items=%d",
-                payload.get("version"),
-                len(payload.get("items", [])),
-            )
-            return payload
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to load evaluation rules")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    @app.put("/evaluation/rules")
-    async def put_evaluation_rules(payload: EvaluationRulesRequest) -> Dict[str, Any]:
-        logger.info("REST /evaluation/rules PUT called")
-        try:
-            saved = retriever.save_evaluation_rules(payload.model_dump(exclude_none=True))
-            logger.info(
-                "REST /evaluation/rules PUT completed: version=%s items=%d",
-                saved.get("version"),
-                len(saved.get("items", [])),
-            )
-            return saved
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to save evaluation rules")
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/evaluation/jobs")
-    async def start_evaluation_job(request: EvaluationJobRequest) -> Dict[str, Any]:
-        logger.info(
-            "REST /evaluation/jobs called: repo_name=%s repo_path=%s",
-            request.repo_name,
-            request.repo_path,
-        )
-        try:
-            job = retriever.start_evaluation_job(repo_name=request.repo_name, repo_path=request.repo_path)
-            logger.info(
-                "REST /evaluation/jobs started: job_id=%s status=%s repo_name=%s",
-                job.get("job_id"),
-                job.get("status"),
-                job.get("repo_name"),
-            )
-            return job
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to start evaluation job")
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.get("/evaluation/jobs")
-    async def list_evaluation_jobs(limit: int = Query(default=20, ge=1, le=200)) -> Dict[str, Any]:
-        logger.info("REST /evaluation/jobs called: limit=%d", limit)
-        try:
-            jobs = retriever.list_evaluation_jobs(limit=limit)
-            logger.info("REST /evaluation/jobs completed: returned=%d", len(jobs))
-            return {"jobs": jobs}
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to list evaluation jobs")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    @app.get("/evaluation/jobs/{job_id}")
-    async def get_evaluation_job(job_id: str) -> Dict[str, Any]:
-        logger.info("REST /evaluation/jobs/{job_id} called: job_id=%s", job_id)
-        try:
-            job = retriever.get_evaluation_job(job_id)
-            logger.info(
-                "REST /evaluation/jobs/{job_id} completed: job_id=%s status=%s",
-                job_id,
-                job.get("status"),
-            )
-            return job
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to fetch evaluation job: job_id=%s", job_id)
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.get("/evaluation/jobs/{job_id}/html")
-    async def get_evaluation_html(job_id: str) -> FileResponse:
-        logger.info("REST /evaluation/jobs/{job_id}/html called: job_id=%s", job_id)
-        try:
-            job = retriever.get_evaluation_job(job_id)
-            html_path = str(job.get("report_html_path", "")).strip()
-            if not html_path and isinstance(job.get("summary"), dict):
-                html_path = str((job.get("summary") or {}).get("report_html_path", "")).strip()
-            if not html_path:
-                raise FileNotFoundError(f"HTML report not ready for job {job_id}")
-            if not os.path.exists(html_path):
-                raise FileNotFoundError(f"HTML report file missing: {html_path}")
-            return FileResponse(path=html_path, media_type="text/html", filename=os.path.basename(html_path))
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to fetch evaluation HTML: job_id=%s", job_id)
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.get("/evaluation/jobs/{job_id}/json")
-    async def get_evaluation_json(job_id: str) -> FileResponse:
-        logger.info("REST /evaluation/jobs/{job_id}/json called: job_id=%s", job_id)
-        try:
-            job = retriever.get_evaluation_job(job_id)
-            json_path = str(job.get("report_json_path", "")).strip()
-            if not json_path and isinstance(job.get("summary"), dict):
-                json_path = str((job.get("summary") or {}).get("report_json_path", "")).strip()
-            if not json_path:
-                raise FileNotFoundError(f"JSON report not ready for job {job_id}")
-            if not os.path.exists(json_path):
-                raise FileNotFoundError(f"JSON report file missing: {json_path}")
-            return FileResponse(path=json_path, media_type="application/json", filename=os.path.basename(json_path))
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to fetch evaluation JSON: job_id=%s", job_id)
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/sessions")
     async def list_sessions(limit: int = Query(default=100, ge=1, le=500)) -> Dict[str, Any]:
@@ -486,8 +272,6 @@ def create_app(cfg: AgenticRagConfig, *, config_path: str) -> FastAPI:
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Agentic RAG chat backend")
     parser.add_argument("--config", default="config.yml", help="Path to Agentic RAG config file")
-    parser.add_argument("--host", help="Override host binding (defaults to chat.api.host in config)")
-    parser.add_argument("--port", type=int, help="Override port binding (defaults to chat.api.port in config)")
     return parser.parse_args(argv)
 
 
@@ -503,23 +287,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
 
     logger.info(
-        (
-            "Loaded config endpoints: config=%s chat_api=%s:%d llm_base_url=%s llm_model=%s "
-            "embedding_base_url=%s embedding_model=%s memory_sqlite=%s"
-        ),
+        "Loaded chat config: config=%s chat_api=%s:%d llm_base_url=%s llm_model=%s memory_sqlite=%s",
         args.config,
         cfg.chat.api.host,
         cfg.chat.api.port,
         cfg.llm.base_url,
         cfg.llm.model,
-        cfg.embedding.base_url,
-        cfg.embedding.model,
         cfg.chat.memory.sqlite_path,
     )
 
     app = create_app(cfg, config_path=args.config)
-    host = args.host or cfg.chat.api.host
-    port = args.port or cfg.chat.api.port
+    host = cfg.chat.api.host
+    port = cfg.chat.api.port
     logger.info("Starting chat API: host=%s port=%d config=%s", host, port, args.config)
     uvicorn.run(app, host=host, port=port)
 

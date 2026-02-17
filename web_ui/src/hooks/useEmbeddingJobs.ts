@@ -1,10 +1,10 @@
 import { useCallback, useState } from "react";
 
-import { ApiClient } from "../api/client";
+import { OpsApiClient } from "../api/client";
 import type { EmbeddingJob } from "../types/api";
 
 
-export function useEmbeddingJobs(client: ApiClient) {
+export function useEmbeddingJobs(client: OpsApiClient) {
   const [jobs, setJobs] = useState<EmbeddingJob[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>("");

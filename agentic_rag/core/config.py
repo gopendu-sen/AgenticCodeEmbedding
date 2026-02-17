@@ -52,6 +52,12 @@ class EmbeddingCollectionsConfig(BaseModel):
     configs: str
     security_tags: str
     flows: str
+    audit_identity_profile: str
+    audit_auth_controls: str
+    audit_money_movement: str
+    audit_payee_recipient: str
+    audit_docs_disclosures: str
+    audit_limits_access: str
 
 
 class EmbeddingConfig(BaseModel):
@@ -61,6 +67,7 @@ class EmbeddingConfig(BaseModel):
     model: str
     timeout_s: int
     batch_size: int
+    enable_audit_dimensions: bool = True
     collections: EmbeddingCollectionsConfig
 
 
@@ -134,11 +141,18 @@ class ParserCallGraphConfig(BaseModel):
 class ParserConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    index_version: str
     docs: ParserChunkConfig
     config: ParserChunkConfig
     markdown: ParserMarkdownConfig
     call_graph: ParserCallGraphConfig
     generic: ParserGenericConfig
+
+    @model_validator(mode="after")
+    def _validate_parser(self):
+        if not self.index_version.strip():
+            raise ValueError("parser.index_version must be a non-empty string")
+        return self
 
 
 class SecurityTaggingConfig(BaseModel):
@@ -180,6 +194,12 @@ class ChatRetrievalConfig(BaseModel):
             "docs",
             "security_tags",
             "flows",
+            "audit_identity_profile",
+            "audit_auth_controls",
+            "audit_money_movement",
+            "audit_payee_recipient",
+            "audit_docs_disclosures",
+            "audit_limits_access",
         }
         if not self.intent_weights:
             raise ValueError("chat.retrieval.intent_weights must define at least one intent profile")
