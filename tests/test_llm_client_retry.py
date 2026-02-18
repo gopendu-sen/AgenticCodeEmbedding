@@ -93,3 +93,24 @@ def test_chat_stream_retries_before_first_token(monkeypatch: pytest.MonkeyPatch)
     tokens = list(client.chat_stream([{"role": "user", "content": "hello"}], temperature=0))
     assert "".join(tokens) == "hello"
     assert calls["count"] == 2
+
+
+def test_chat_forwards_optional_max_tokens(monkeypatch: pytest.MonkeyPatch):
+    client = LLMClient(base_url="http://llm.local/v1", model="m", timeout_s=5, retry_attempts=0, retry_backoff_base_s=0)
+    seen: Dict[str, Any] = {}
+
+    def fake_post(*_args, **kwargs):
+        seen.update(kwargs.get("json") or {})
+        return _Response(
+            status_code=200,
+            body={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    monkeypatch.setattr("agentic_rag.core.llm_client.requests.post", fake_post)
+
+    out = client.chat([{"role": "user", "content": "hello"}], temperature=0, max_tokens=123)
+    assert out == "ok"
+    assert seen.get("max_tokens") == 123

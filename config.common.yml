@@ -1,0 +1,424 @@
+paths:
+  # Relative paths resolve from this config file directory.
+  repo_path: "."
+  out_dir: "./out_index"
+  sqlite_path: "./out_index/metadata.db"
+  chroma_dir: "./out_index/chroma"
+  reports_dir: "./reports"
+
+file_selection:
+  include_exts:
+    - ".py"
+    - ".js"
+    - ".jsx"
+    - ".ts"
+    - ".tsx"
+    - ".java"
+    - ".kt"
+    - ".kts"
+    - ".scala"
+    - ".sc"
+    - ".cs"
+    - ".go"
+    - ".cob"
+    - ".cbl"
+    - ".cpy"
+    - ".r"
+    - ".sql"
+    - ".c"
+    - ".cc"
+    - ".cpp"
+    - ".cxx"
+    - ".h"
+    - ".hh"
+    - ".hpp"
+    - ".hxx"
+    - ".yml"
+    - ".yaml"
+    - ".json"
+    - ".toml"
+    - ".ini"
+    - ".xml"
+    - ".properties"
+    - ".html"
+    - ".htm"
+    - ".xhtml"
+    - ".jsp"
+    - ".jspx"
+    - ".cshtml"
+    - ".md"
+    - ".txt"
+    - ".ipynb"
+  exclude_dirs:
+    - ".git"
+    - ".venv"
+    - "venv"
+    - "__pycache__"
+    - "node_modules"
+    - "dist"
+    - "build"
+    - ".pytest_cache"
+    - ".mypy_cache"
+    - ".ruff_cache"
+    - ".idea"
+    - ".vscode"
+  max_file_size_bytes: 2000000
+
+io_limits:
+  read_file_max_chars: 400000
+  repo_tree_max_files: 400
+  tool_search_max_hits: 50
+  manifest_snippet_chars: 3000
+  llm_header_preview_lines: 80
+  node_text_max_chars: 8000
+  embed_doc_max_chars: 3000
+
+llm:
+  enabled: true
+  # base_url: "http://localhost:8000/v1"
+  base_url: "http://localhost:11434/v1"
+  model: "phi4-mini:latest"
+  timeout_s: 600
+
+embedding:
+  # base_url: "http://localhost:8001/v1"
+  base_url: "http://127.0.0.1:8026/v1"
+  model: "snowflake-arctic-embed:110m"
+  timeout_s: 600
+  batch_size: 20
+  enable_audit_dimensions: true
+  collections:
+    code_symbols: "code_symbols"
+    code_routes: "code_routes"
+    code_usage: "code_usage"
+    configs: "configs"
+    docs: "docs"
+    security_tags: "security_tags"
+    flows: "flows"
+    audit_identity_profile: "audit_identity_profile"
+    audit_auth_controls: "audit_auth_controls"
+    audit_money_movement: "audit_money_movement"
+    audit_payee_recipient: "audit_payee_recipient"
+    audit_docs_disclosures: "audit_docs_disclosures"
+    audit_limits_access: "audit_limits_access"
+
+fallback:
+  parse:
+    enabled: true
+    confidence_threshold: 0.70
+    llm_auto_split_enabled: true
+    llm_soft_input_tokens: 1400
+    llm_target_input_tokens: 850
+    llm_max_completion_tokens: 384
+    tool_read_lines_max_span: 120
+    tool_output_text_max_chars: 600
+    oom_retry_max_attempts: 2
+    oom_retry_shrink_ratio: 0.6
+    allowed_exts:
+      - ".py"
+      - ".js"
+      - ".jsx"
+      - ".ts"
+      - ".tsx"
+      - ".java"
+      - ".kt"
+      - ".kts"
+      - ".scala"
+      - ".sc"
+      - ".cs"
+      - ".go"
+      - ".cob"
+      - ".cbl"
+      - ".cpy"
+      - ".r"
+      - ".sql"
+      - ".c"
+      - ".cc"
+      - ".cpp"
+      - ".cxx"
+      - ".h"
+      - ".hh"
+      - ".hpp"
+      - ".hxx"
+      - ".ipynb"
+    important_dir_hints:
+      - "api/"
+      - "src/"
+      - "app/"
+      - "routes/"
+      - "controllers/"
+      - "security/"
+      - "auth/"
+      - "middleware/"
+      - "service/"
+      - "services/"
+    important_keywords:
+      - "auth"
+      - "jwt"
+      - "oauth"
+      - "permission"
+      - "policy"
+      - "role"
+      - "rbac"
+      - "abac"
+      - "audit"
+      - "transfer"
+      - "customer"
+  stack:
+    enabled: true
+    llm_min_confidence: 0.70
+    manifest_files:
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "package.json"
+      - "pom.xml"
+      - "build.gradle"
+      - "Dockerfile"
+
+stack_detection:
+  signals:
+    python:
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "setup.py"
+      - "Pipfile"
+    node:
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "yarn.lock"
+      - "package-lock.json"
+    java:
+      - "pom.xml"
+      - "build.gradle"
+      - "build.gradle.kts"
+    scala:
+      - "build.sbt"
+      - "project/build.properties"
+      - "build.sc"
+    dotnet:
+      - ".sln"
+    go:
+      - "go.mod"
+    r:
+      - "renv.lock"
+      - "DESCRIPTION"
+  dotnet_project_suffixes:
+    - ".csproj"
+  confidence:
+    base: 0.4
+    per_signal: 0.15
+    max: 0.95
+
+parser:
+  index_version: "v2_rules_recall_2026_02_17"
+  docs:
+    chunk_lines: 120
+    overlap_lines: 20
+  config:
+    chunk_lines: 160
+    overlap_lines: 20
+  markdown:
+    chunk_lines: 100
+    overlap_lines: 20
+  call_graph:
+    max_callees_per_scope: 24
+  generic:
+    fallback_confidence: 0.4
+
+security_tagging:
+  enabled: true
+  supported_exts:
+    - ".py"
+    - ".js"
+    - ".jsx"
+    - ".ts"
+    - ".tsx"
+    - ".java"
+    - ".kt"
+    - ".kts"
+    - ".scala"
+    - ".sc"
+    - ".cs"
+    - ".go"
+    - ".cob"
+    - ".cbl"
+    - ".cpy"
+    - ".r"
+    - ".sql"
+    - ".c"
+    - ".cc"
+    - ".cpp"
+    - ".cxx"
+    - ".h"
+    - ".hh"
+    - ".hpp"
+    - ".hxx"
+  llm_timeout_s: 60
+  max_header_lines: 160
+  llm_auto_split_enabled: true
+  llm_soft_input_tokens: 1400
+  llm_target_input_tokens: 850
+  llm_max_completion_tokens: 384
+  tool_read_lines_max_span: 120
+  tool_output_text_max_chars: 600
+  oom_retry_max_attempts: 2
+  oom_retry_shrink_ratio: 0.6
+
+logging:
+  level: "INFO"
+  embedding_verbose_per_node: true
+
+evaluation:
+  rules_json_path: "./retreiving_module/default_evaluation_rules.json"
+  jobs_dir: "./reports/evaluation_jobs"
+  reports_dir: "./reports/evaluations"
+  log_jsonl_path: "./reports/evaluation_log.jsonl"
+  evidence_per_item: 5
+  max_candidates_per_item: 30
+  max_snippet_chars: 1200
+  llm_timeout_s: 120
+  html_title: "Vyom Evaluation Report"
+  llm_auto_split_enabled: true
+  llm_soft_input_tokens: 1400
+  llm_target_input_tokens: 900
+  llm_max_completion_tokens: 256
+  llm_batch_max_evidences: 2
+  oom_retry_max_attempts: 2
+  oom_retry_shrink_ratio: 0.6
+
+chat:
+  title: "Vyom"
+  subtitle: "AuditPilot AI - Code Auditor Assistant and Audit Finding Generator."
+  assistant_greeting: "Hi, I can help you analyze code, trace controls, and generate audit-ready findings."
+  input_placeholder: "Ask a question about the repository..."
+  spinner_text: "Thinking..."
+  system_prompt: "You are a repository assistant. Answer using the retrieved context first. If context is insufficient, say so clearly and provide the best possible guidance without fabricating."
+  history_messages: 12
+  api:
+    host: "0.0.0.0"
+    port: 8025
+    cors_allowed_origins:
+      - "http://localhost:5173"
+      - "http://127.0.0.1:5173"
+      - "http://localhost:4173"
+      - "http://127.0.0.1:4173"
+  ui:
+    host: "0.0.0.0"
+    port: 5173
+  memory:
+    sqlite_path: "./out_index/chat_memory.db"
+    max_history_messages: 20
+    enable_summarisation: true
+    enable_intent_tracking: false
+    summarise_prompt: "Summarise the conversation so far in under 140 words. Focus on concrete code findings and unresolved questions."
+    intent_prompt: "Identify the user's primary intent in the latest message. Respond with a short verb-noun phrase."
+  retrieval:
+    base_top_k: 3
+    intent_weights:
+      audit:
+        code_symbols: 1.0
+        code_routes: 3.0
+        code_usage: 3.0
+        configs: 1.0
+        docs: 1.0
+        security_tags: 4.0
+        flows: 2.0
+        audit_identity_profile: 4.0
+        audit_auth_controls: 4.0
+        audit_money_movement: 4.0
+        audit_payee_recipient: 3.0
+        audit_docs_disclosures: 2.0
+        audit_limits_access: 3.0
+      security:
+        code_symbols: 1.0
+        code_routes: 2.0
+        code_usage: 3.0
+        configs: 1.0
+        docs: 1.0
+        security_tags: 4.0
+        flows: 2.0
+        audit_identity_profile: 2.0
+        audit_auth_controls: 5.0
+        audit_money_movement: 2.0
+        audit_payee_recipient: 1.0
+        audit_docs_disclosures: 1.0
+        audit_limits_access: 4.0
+      config:
+        code_symbols: 1.0
+        code_routes: 1.0
+        code_usage: 1.0
+        configs: 5.0
+        docs: 2.0
+        security_tags: 2.0
+        flows: 1.0
+        audit_identity_profile: 1.0
+        audit_auth_controls: 1.0
+        audit_money_movement: 1.0
+        audit_payee_recipient: 1.0
+        audit_docs_disclosures: 1.0
+        audit_limits_access: 1.0
+      general:
+        code_symbols: 3.0
+        code_routes: 2.0
+        code_usage: 2.0
+        configs: 2.0
+        docs: 3.0
+        security_tags: 2.0
+        flows: 1.0
+        audit_identity_profile: 2.0
+        audit_auth_controls: 2.0
+        audit_money_movement: 2.0
+        audit_payee_recipient: 2.0
+        audit_docs_disclosures: 2.0
+        audit_limits_access: 2.0
+      flow:
+        code_symbols: 1.0
+        code_routes: 3.0
+        code_usage: 4.0
+        configs: 1.0
+        docs: 1.0
+        security_tags: 2.0
+        flows: 5.0
+        audit_identity_profile: 2.0
+        audit_auth_controls: 2.0
+        audit_money_movement: 4.0
+        audit_payee_recipient: 3.0
+        audit_docs_disclosures: 1.0
+        audit_limits_access: 2.0
+    intent_keywords:
+      audit:
+        - "audit"
+        - "compliance"
+        - "trace"
+        - "evidence"
+        - "control"
+      security:
+        - "auth"
+        - "authorization"
+        - "policy"
+        - "rbac"
+        - "abac"
+        - "permission"
+        - "jwt"
+        - "oauth"
+      config:
+        - "config"
+        - "yaml"
+        - "json"
+        - "env"
+        - "feature flag"
+        - "scope"
+        - "provider"
+      flow:
+        - "flow"
+        - "call chain"
+        - "execution path"
+        - "path"
+        - "trace route"
+  store_discovery:
+    sample_size_per_collection: 500
+    max_store_names: 200
+  max_context_chunks: 10
+  max_context_chars: 12000
+  temperature: 0.1
+  show_sources: true

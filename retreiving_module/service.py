@@ -15,6 +15,13 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from agentic_rag.agentic_ai.orchestrator import AgenticRagOrchestrator
 from agentic_rag.core.config import AgenticRagConfig
 from agentic_rag.core.llm_client import LLMClient
+from agentic_rag.core.prompt_budget import (
+    build_llm_call_log_fields,
+    estimate_tokens_for_messages,
+    estimate_tokens_from_text,
+    is_oom_error,
+    pack_items_by_token_budget,
+)
 from agentic_rag.embedding.chroma_store import ChromaStore
 from agentic_rag.embedding.client import EmbeddingClient
 
@@ -1228,25 +1235,104 @@ class StoreRetriever:
             return "Not Detected"
         return "Needs Review"
 
-    def _evaluate_rule_with_llm(
+    @staticmethod
+    def _normalize_eval_str_list(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        out: List[str] = []
+        seen = set()
+        for item in value:
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            out.append(text)
+            seen.add(text)
+        return out
+
+    def _normalize_eval_decision(
         self,
-        rule: Dict[str, Any],
+        llm_json: Dict[str, Any],
         evidences: List[Dict[str, Any]],
         matched_strong: List[str],
         matched_weak: List[str],
         matched_false_pos: List[str],
     ) -> Dict[str, Any]:
-        evidence_lines: List[str] = []
-        for ev in evidences:
-            citation_id = ev.get("citation_id")
-            evidence_lines.append(
-                (
-                    f"[{citation_id}] file={ev.get('file_path')} lines={ev.get('start_line')}-{ev.get('end_line')} "
-                    f"type={ev.get('node_type')} collection={ev.get('collection')} distance={ev.get('distance')}\n"
-                    f"{ev.get('snippet', '')}"
-                )
-            )
+        status = self._normalize_eval_status(llm_json.get("status"))
+        reason = str(llm_json.get("reason", "")).strip()
+        confidence = max(0.0, min(1.0, self._coerce_float(llm_json.get("confidence"), default=0.0)))
+        evidence_ids_raw = llm_json.get("evidence_ids", [])
+        evidence_ids: List[int] = []
+        if isinstance(evidence_ids_raw, list):
+            for value in evidence_ids_raw:
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    continue
+                evidence_ids.append(idx)
+        if not evidence_ids:
+            evidence_ids = [int(ev.get("citation_id")) for ev in evidences if isinstance(ev.get("citation_id"), int)]
 
+        return {
+            "status": status,
+            "reason": reason,
+            "confidence": confidence,
+            "evidence_ids": sorted(set(evidence_ids)),
+            "matched_strong_signals": self._normalize_eval_str_list(llm_json.get("matched_strong_signals")) or matched_strong,
+            "matched_weak_signals": self._normalize_eval_str_list(llm_json.get("matched_weak_signals")) or matched_weak,
+            "false_positive_risks": self._normalize_eval_str_list(llm_json.get("false_positive_risks")) or matched_false_pos,
+        }
+
+    def _call_evaluation_llm_json(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        phase: str,
+        split_batch_idx: Optional[int] = None,
+        split_batch_total: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        fields = build_llm_call_log_fields(
+            phase=phase,
+            messages=messages,
+            split_batch_idx=split_batch_idx,
+            split_batch_total=split_batch_total,
+        )
+        logger.info(
+            "Evaluation LLM call: phase=%s estimated_input_tokens=%d estimated_input_chars=%d split_batch_idx=%s split_batch_total=%s",
+            fields["phase"],
+            int(fields["estimated_input_tokens"]),
+            int(fields["estimated_input_chars"]),
+            fields.get("split_batch_idx"),
+            fields.get("split_batch_total"),
+        )
+
+        previous_timeout = self.llm.timeout_s
+        self.llm.timeout_s = int(self.cfg.evaluation.llm_timeout_s)
+        try:
+            return self.llm.chat_json(
+                messages,
+                max_tokens=int(self.cfg.evaluation.llm_max_completion_tokens),
+            )
+        finally:
+            self.llm.timeout_s = previous_timeout
+
+    @staticmethod
+    def _evaluation_evidence_line(ev: Dict[str, Any]) -> str:
+        citation_id = ev.get("citation_id")
+        return (
+            f"[{citation_id}] file={ev.get('file_path')} lines={ev.get('start_line')}-{ev.get('end_line')} "
+            f"type={ev.get('node_type')} collection={ev.get('collection')} distance={ev.get('distance')}\n"
+            f"{ev.get('snippet', '')}"
+        )
+
+    def _build_evaluation_messages(
+        self,
+        *,
+        rule: Dict[str, Any],
+        evidence_lines: List[str],
+        matched_strong: List[str],
+        matched_weak: List[str],
+        matched_false_pos: List[str],
+    ) -> List[Dict[str, str]]:
         system_prompt = (
             "You are an audit evaluator. Return ONLY valid JSON object with keys: "
             "status, reason, confidence, evidence_ids, matched_strong_signals, "
@@ -1266,51 +1352,272 @@ class StoreRetriever:
             "Evidence candidates:\n"
             + ("\n\n".join(evidence_lines) if evidence_lines else "No evidence found.")
         )
-        messages = [
+        return [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
-        previous_timeout = self.llm.timeout_s
-        self.llm.timeout_s = int(self.cfg.evaluation.llm_timeout_s)
-        try:
-            llm_json = self.llm.chat_json(messages)
-        finally:
-            self.llm.timeout_s = previous_timeout
-        status = self._normalize_eval_status(llm_json.get("status"))
-        reason = str(llm_json.get("reason", "")).strip()
-        confidence = max(0.0, min(1.0, self._coerce_float(llm_json.get("confidence"), default=0.0)))
-        evidence_ids_raw = llm_json.get("evidence_ids", [])
-        evidence_ids: List[int] = []
-        if isinstance(evidence_ids_raw, list):
-            for value in evidence_ids_raw:
-                try:
-                    idx = int(value)
-                except (TypeError, ValueError):
-                    continue
-                evidence_ids.append(idx)
-        if not evidence_ids:
-            evidence_ids = [int(ev.get("citation_id")) for ev in evidences if isinstance(ev.get("citation_id"), int)]
+    def _deterministic_eval_fallback(
+        self,
+        *,
+        rule_id: str,
+        evidences: List[Dict[str, Any]],
+        matched_strong: List[str],
+        matched_weak: List[str],
+        matched_false_pos: List[str],
+        decisions: Optional[List[Dict[str, Any]]] = None,
+        reason_prefix: str = "Deterministic fallback",
+    ) -> Dict[str, Any]:
+        merged_strong = list(self._normalize_eval_str_list(matched_strong))
+        merged_weak = list(self._normalize_eval_str_list(matched_weak))
+        merged_false = list(self._normalize_eval_str_list(matched_false_pos))
+        evidence_ids = sorted(
+            {
+                int(ev.get("citation_id"))
+                for ev in evidences
+                if isinstance(ev.get("citation_id"), int)
+            }
+        )
+        if decisions:
+            for decision in decisions:
+                merged_strong.extend(self._normalize_eval_str_list(decision.get("matched_strong_signals")))
+                merged_weak.extend(self._normalize_eval_str_list(decision.get("matched_weak_signals")))
+                merged_false.extend(self._normalize_eval_str_list(decision.get("false_positive_risks")))
+                for raw in decision.get("evidence_ids", []):
+                    try:
+                        evidence_ids.append(int(raw))
+                    except (TypeError, ValueError):
+                        continue
+        merged_strong = self._normalize_eval_str_list(merged_strong)
+        merged_weak = self._normalize_eval_str_list(merged_weak)
+        merged_false = self._normalize_eval_str_list(merged_false)
+        evidence_ids = sorted(set(evidence_ids))
 
-        def _normalize_str_list(value: Any) -> List[str]:
-            if not isinstance(value, list):
-                return []
-            out: List[str] = []
-            for item in value:
-                text = str(item).strip()
-                if text:
-                    out.append(text)
-            return out
+        if merged_strong and len(merged_strong) >= len(merged_false):
+            status = "Detected"
+            confidence = min(0.9, 0.55 + (0.05 * len(merged_strong)))
+        elif not merged_strong and not merged_weak:
+            status = "Not Detected"
+            confidence = 0.7
+        else:
+            status = "Needs Review"
+            confidence = 0.45
 
+        reason = (
+            f"{reason_prefix} for rule {rule_id}: "
+            f"strong={len(merged_strong)} weak={len(merged_weak)} false_positive={len(merged_false)}."
+        )
         return {
             "status": status,
             "reason": reason,
             "confidence": confidence,
             "evidence_ids": evidence_ids,
-            "matched_strong_signals": _normalize_str_list(llm_json.get("matched_strong_signals")) or matched_strong,
-            "matched_weak_signals": _normalize_str_list(llm_json.get("matched_weak_signals")) or matched_weak,
-            "false_positive_risks": _normalize_str_list(llm_json.get("false_positive_risks")) or matched_false_pos,
+            "matched_strong_signals": merged_strong,
+            "matched_weak_signals": merged_weak,
+            "false_positive_risks": merged_false,
         }
+
+    def _evaluate_rule_with_llm(
+        self,
+        rule: Dict[str, Any],
+        evidences: List[Dict[str, Any]],
+        matched_strong: List[str],
+        matched_weak: List[str],
+        matched_false_pos: List[str],
+    ) -> Dict[str, Any]:
+        rule_id = str(rule.get("id", "unknown"))
+        evidence_lines = [self._evaluation_evidence_line(ev) for ev in evidences]
+        full_messages = self._build_evaluation_messages(
+            rule=rule,
+            evidence_lines=evidence_lines,
+            matched_strong=matched_strong,
+            matched_weak=matched_weak,
+            matched_false_pos=matched_false_pos,
+        )
+
+        soft_base = max(1, int(self.cfg.evaluation.llm_soft_input_tokens))
+        target_base = max(1, min(int(self.cfg.evaluation.llm_target_input_tokens), soft_base))
+        max_retries = max(0, int(self.cfg.evaluation.oom_retry_max_attempts))
+        shrink_ratio = float(self.cfg.evaluation.oom_retry_shrink_ratio)
+        batch_max_evidences = max(1, int(self.cfg.evaluation.llm_batch_max_evidences))
+
+        if (
+            not self.cfg.evaluation.llm_auto_split_enabled
+            or len(evidences) <= 1
+            or estimate_tokens_for_messages(full_messages) <= soft_base
+        ):
+            try:
+                llm_json = self._call_evaluation_llm_json(full_messages, phase="evaluation_single")
+                return self._normalize_eval_decision(
+                    llm_json=llm_json,
+                    evidences=evidences,
+                    matched_strong=matched_strong,
+                    matched_weak=matched_weak,
+                    matched_false_pos=matched_false_pos,
+                )
+            except Exception as exc:  # noqa: BLE001
+                can_split = bool(self.cfg.evaluation.llm_auto_split_enabled and len(evidences) > 1)
+                if not is_oom_error(exc) or not can_split:
+                    raise
+                logger.warning("Evaluation single-call OOM; switching to split mode: rule_id=%s error=%s", rule_id, exc)
+
+        for attempt in range(0, max_retries + 1):
+            shrink = shrink_ratio ** attempt
+            soft_budget = max(1, int(round(soft_base * shrink)))
+            target_budget = max(1, min(int(round(target_base * shrink)), soft_budget))
+            current_batch_max = max(1, int(round(batch_max_evidences * shrink)))
+
+            evidence_items = [
+                {
+                    "evidence": ev,
+                    "line": self._evaluation_evidence_line(ev),
+                }
+                for ev in evidences
+            ]
+            item_token_fn = lambda item: estimate_tokens_from_text(str(item.get("line", "")))
+            packed = pack_items_by_token_budget(
+                evidence_items,
+                item_token_fn,
+                soft_budget=soft_budget,
+                target_budget=target_budget,
+            )
+
+            batches: List[List[Dict[str, Any]]] = []
+            for packed_batch in packed:
+                start = 0
+                while start < len(packed_batch):
+                    batches.append(packed_batch[start:start + current_batch_max])
+                    start += current_batch_max
+            if not batches:
+                batches = [evidence_items]
+
+            logger.info(
+                "Evaluation split enabled: rule_id=%s batches=%d soft_budget=%d target_budget=%d batch_max=%d",
+                rule_id,
+                len(batches),
+                soft_budget,
+                target_budget,
+                current_batch_max,
+            )
+
+            try:
+                decisions: List[Dict[str, Any]] = []
+                for batch_idx, batch in enumerate(batches, start=1):
+                    batch_evidences = [item["evidence"] for item in batch if isinstance(item.get("evidence"), dict)]
+                    batch_lines = [item["line"] for item in batch if isinstance(item.get("line"), str)]
+                    batch_text = "\n".join(ev.get("snippet", "") for ev in batch_evidences)
+                    batch_matched_strong = self._match_signals(rule.get("strong_signals", []), batch_text)
+                    batch_matched_weak = self._match_signals(rule.get("weak_signals", []), batch_text)
+                    batch_matched_false = self._match_signals(rule.get("false_positives", []), batch_text)
+                    batch_messages = self._build_evaluation_messages(
+                        rule=rule,
+                        evidence_lines=batch_lines,
+                        matched_strong=batch_matched_strong,
+                        matched_weak=batch_matched_weak,
+                        matched_false_pos=batch_matched_false,
+                    )
+                    llm_json = self._call_evaluation_llm_json(
+                        batch_messages,
+                        phase="evaluation_batch",
+                        split_batch_idx=batch_idx,
+                        split_batch_total=len(batches),
+                    )
+                    decision = self._normalize_eval_decision(
+                        llm_json=llm_json,
+                        evidences=batch_evidences,
+                        matched_strong=batch_matched_strong,
+                        matched_weak=batch_matched_weak,
+                        matched_false_pos=batch_matched_false,
+                    )
+                    decisions.append(decision)
+
+                if len(decisions) == 1:
+                    return decisions[0]
+
+                compact_decisions: List[Dict[str, Any]] = []
+                for batch_idx, decision in enumerate(decisions, start=1):
+                    reason_text = str(decision.get("reason", "")).strip()
+                    compact_decisions.append(
+                        {
+                            "batch": batch_idx,
+                            "status": self._normalize_eval_status(decision.get("status")),
+                            "confidence": round(self._coerce_float(decision.get("confidence"), 0.0), 4),
+                            "reason": reason_text[:220],
+                            "evidence_ids": [int(raw) for raw in decision.get("evidence_ids", []) if isinstance(raw, int)],
+                            "matched_strong_signals": self._normalize_eval_str_list(decision.get("matched_strong_signals"))[:8],
+                            "matched_weak_signals": self._normalize_eval_str_list(decision.get("matched_weak_signals"))[:8],
+                            "false_positive_risks": self._normalize_eval_str_list(decision.get("false_positive_risks"))[:8],
+                        }
+                    )
+
+                synth_messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Merge batch findings into one final audit decision. "
+                            "Return ONLY JSON with keys: status, reason, confidence, evidence_ids, "
+                            "matched_strong_signals, matched_weak_signals, false_positive_risks. "
+                            "Allowed status: Detected, Not Detected, Needs Review."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Rule ID: {rule_id}\n"
+                            f"Strong signals: {rule.get('strong_signals')}\n"
+                            f"Weak signals: {rule.get('weak_signals')}\n"
+                            f"False positives: {rule.get('false_positives')}\n"
+                            f"Global deterministic strong: {matched_strong}\n"
+                            f"Global deterministic weak: {matched_weak}\n"
+                            f"Global deterministic false positives: {matched_false_pos}\n\n"
+                            f"Batch summaries JSON:\n{json.dumps(compact_decisions, ensure_ascii=False, separators=(',', ':'))}"
+                        ),
+                    },
+                ]
+
+                try:
+                    synth_json = self._call_evaluation_llm_json(synth_messages, phase="evaluation_synthesis")
+                    return self._normalize_eval_decision(
+                        llm_json=synth_json,
+                        evidences=evidences,
+                        matched_strong=matched_strong,
+                        matched_weak=matched_weak,
+                        matched_false_pos=matched_false_pos,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Evaluation synthesis failed; using deterministic fallback: rule_id=%s error=%s", rule_id, exc)
+                    return self._deterministic_eval_fallback(
+                        rule_id=rule_id,
+                        evidences=evidences,
+                        matched_strong=matched_strong,
+                        matched_weak=matched_weak,
+                        matched_false_pos=matched_false_pos,
+                        decisions=decisions,
+                        reason_prefix="Synthesis failure fallback",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                if is_oom_error(exc) and attempt < max_retries:
+                    logger.warning(
+                        "Evaluation batch OOM retry: rule_id=%s attempt=%d/%d next_soft_budget=%d next_target_budget=%d error=%s",
+                        rule_id,
+                        attempt + 1,
+                        max_retries + 1,
+                        max(1, int(round(soft_base * (shrink_ratio ** (attempt + 1))))),
+                        max(1, int(round(target_base * (shrink_ratio ** (attempt + 1))))),
+                        exc,
+                    )
+                    continue
+                raise
+
+        return self._deterministic_eval_fallback(
+            rule_id=rule_id,
+            evidences=evidences,
+            matched_strong=matched_strong,
+            matched_weak=matched_weak,
+            matched_false_pos=matched_false_pos,
+            decisions=None,
+            reason_prefix="OOM retries exhausted",
+        )
 
     def _render_evaluation_html(self, report_payload: Dict[str, Any]) -> str:
         summary = report_payload.get("summary", {})

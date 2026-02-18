@@ -49,12 +49,76 @@ function stripQuotes(value: string): string {
   return trimmed;
 }
 
-function parseYamlScalars(filePath: string): Record<string, string> {
-  const content = fs.readFileSync(filePath, "utf8");
+function parseTopLevelExtends(lines: string[], filePath: string): string[] {
+  const out: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const withoutComment = stripInlineComment(lines[index]);
+    if (!withoutComment.trim()) {
+      continue;
+    }
+
+    const indent = withoutComment.match(/^ */)?.[0].length ?? 0;
+    const depth = Math.floor(indent / 2);
+    if (depth !== 0) {
+      continue;
+    }
+
+    const trimmed = withoutComment.trim();
+    if (!trimmed.startsWith("extends:")) {
+      continue;
+    }
+
+    const rawValue = trimmed.slice("extends:".length).trim();
+    if (rawValue) {
+      const value = stripQuotes(rawValue);
+      if (!value) {
+        throw new Error(`Invalid extends entry in ${filePath}`);
+      }
+      out.push(value);
+      return out;
+    }
+
+    for (let lookahead = index + 1; lookahead < lines.length; lookahead += 1) {
+      const nestedRaw = stripInlineComment(lines[lookahead]);
+      if (!nestedRaw.trim()) {
+        continue;
+      }
+      const nestedIndent = nestedRaw.match(/^ */)?.[0].length ?? 0;
+      const nestedDepth = Math.floor(nestedIndent / 2);
+      if (nestedDepth <= 0) {
+        break;
+      }
+      const nestedTrimmed = nestedRaw.trim();
+      if (nestedDepth === 1 && nestedTrimmed.startsWith("- ")) {
+        const includeValue = stripQuotes(nestedTrimmed.slice(2).trim());
+        if (!includeValue) {
+          throw new Error(`Invalid extends list entry in ${filePath}`);
+        }
+        out.push(includeValue);
+        continue;
+      }
+      throw new Error(`Invalid extends format in ${filePath}: expected list items under extends`);
+    }
+
+    return out;
+  }
+  return out;
+}
+
+function parseYamlScalars(filePath: string, ancestry: Set<string> = new Set()): Record<string, string> {
+  const absolutePath = path.resolve(filePath);
+  if (ancestry.has(absolutePath)) {
+    throw new Error(`Config extends cycle detected while reading ${absolutePath}`);
+  }
+  const nextAncestry = new Set(ancestry);
+  nextAncestry.add(absolutePath);
+
+  const content = fs.readFileSync(absolutePath, "utf8");
+  const lines = content.split(/\r?\n/);
   const out: Record<string, string> = {};
   const stack: string[] = [];
 
-  for (const rawLine of content.split(/\r?\n/)) {
+  for (const rawLine of lines) {
     const withoutComment = stripInlineComment(rawLine);
     if (!withoutComment.trim()) {
       continue;
@@ -89,7 +153,16 @@ function parseYamlScalars(filePath: string): Record<string, string> {
     out[scalarPath] = stripQuotes(rawValue);
   }
 
-  return out;
+  delete out["extends"];
+
+  const merged: Record<string, string> = {};
+  const extendsEntries = parseTopLevelExtends(lines, absolutePath);
+  for (const includePath of extendsEntries) {
+    const resolvedInclude = path.resolve(path.dirname(absolutePath), includePath);
+    Object.assign(merged, parseYamlScalars(resolvedInclude, nextAncestry));
+  }
+  Object.assign(merged, out);
+  return merged;
 }
 
 function requireStringScalar(values: Record<string, string>, key: string, filePath: string): string {

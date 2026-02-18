@@ -125,11 +125,13 @@ cd ..
 ```
 
 ## Run (Step by Step)
-1. Keep `config.yml` for backward compatibility, then use split configs:
-- `config.chat.yml`: chat service config (with `embedding.base_url: "http://127.0.0.1:8026/v1"`).
+1. Config layout:
+- `config.common.yml`: shared defaults used by all app configs.
+- `config.chat.yml`: chat service config (extends `config.common.yml`).
   - Chat bind settings are driven by YAML: `chat.api.host` and `chat.api.port`.
   - UI dev-server bind settings are driven by YAML: `chat.ui.host` and `chat.ui.port`.
-- `config.embedding.yml`: ops service config (with upstream embedding provider in `embedding.base_url`).
+- `config.embedding.yml`: ops service config (extends `config.common.yml`, overrides upstream `embedding.base_url` and ops API port).
+- `config.yml`: legacy backward-compatible wrapper (extends `config.common.yml`).
 
 2. Start ops service (embedding/evaluation + `/v1/embeddings` proxy):
 ```bash
@@ -367,7 +369,8 @@ Embedding text payload is enriched with selected metadata when present:
 
 ## Config Rules
 - Source configs:
-  - `config.yml` (legacy single-service compatible)
+  - `config.common.yml` (shared defaults)
+  - `config.yml` (legacy single-service compatible wrapper)
   - `config.chat.yml` (chat service)
   - `config.embedding.yml` (ops service)
 - Env overrides: `AGENTIC_RAG__...` keys only
@@ -395,7 +398,7 @@ Embedding text payload is enriched with selected metadata when present:
   - then run `start_apps.bat` (it now prefers `.venv\Scripts\python.exe` automatically)
 
 3. CORS errors from browser:
-- add frontend origin to `chat.api.cors_allowed_origins` in both `config.chat.yml` and `config.embedding.yml`
+- add frontend origin to `chat.api.cors_allowed_origins` in `config.common.yml` (or override in app-specific YAML when needed)
 
 4. Old/generic answers without citations:
 - verify retrieval source count in `retrieve_log.jsonl`

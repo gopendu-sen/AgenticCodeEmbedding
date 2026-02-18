@@ -92,7 +92,16 @@ class AgenticRagOrchestrator:
             model=(cfg.llm.model or "").strip(),
             timeout_s=cfg.llm.timeout_s,
         )
-        self.agent = ToolPlanParseAgent(self.llm)
+        self.agent = ToolPlanParseAgent(
+            self.llm,
+            auto_split_enabled=cfg.fallback.parse.llm_auto_split_enabled,
+            soft_input_tokens=cfg.fallback.parse.llm_soft_input_tokens,
+            target_input_tokens=cfg.fallback.parse.llm_target_input_tokens,
+            max_completion_tokens=cfg.fallback.parse.llm_max_completion_tokens,
+            oom_retry_max_attempts=cfg.fallback.parse.oom_retry_max_attempts,
+            oom_retry_shrink_ratio=cfg.fallback.parse.oom_retry_shrink_ratio,
+            tool_output_text_max_chars=cfg.fallback.parse.tool_output_text_max_chars,
+        )
         self.security_llm = None
 
         logger.info(
@@ -120,7 +129,16 @@ class AgenticRagOrchestrator:
             security_llm.probe()
             logger.info("Security tagger LLM probe succeeded")
             self.security_llm = security_llm
-            self.security_agent = SecurityTagAgent(security_llm)
+            self.security_agent = SecurityTagAgent(
+                security_llm,
+                auto_split_enabled=cfg.security_tagging.llm_auto_split_enabled,
+                soft_input_tokens=cfg.security_tagging.llm_soft_input_tokens,
+                target_input_tokens=cfg.security_tagging.llm_target_input_tokens,
+                max_completion_tokens=cfg.security_tagging.llm_max_completion_tokens,
+                oom_retry_max_attempts=cfg.security_tagging.oom_retry_max_attempts,
+                oom_retry_shrink_ratio=cfg.security_tagging.oom_retry_shrink_ratio,
+                tool_output_text_max_chars=cfg.security_tagging.tool_output_text_max_chars,
+            )
 
     def _write_report(self, report_payload: Dict[str, Any]) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -428,7 +446,12 @@ class AgenticRagOrchestrator:
                             rf.rel_path,
                             len(plan.get("steps", [])) if isinstance(plan, dict) else 0,
                         )
-                        tool_out = execute_tool_plan(self.repo, plan)
+                        tool_out = execute_tool_plan(
+                            self.repo,
+                            plan,
+                            max_read_line_span=self.cfg.fallback.parse.tool_read_lines_max_span,
+                            max_output_text_chars=self.cfg.fallback.parse.tool_output_text_max_chars,
+                        )
                         final = self.agent.finalize(rf.rel_path, lang, tool_out)
 
                         llm_nodes = build_nodes_from_agent(
@@ -490,7 +513,12 @@ class AgenticRagOrchestrator:
                             rf.rel_path,
                             len(security_plan.get("steps", [])) if isinstance(security_plan, dict) else 0,
                         )
-                        security_tool_out = execute_tool_plan(self.repo, security_plan)
+                        security_tool_out = execute_tool_plan(
+                            self.repo,
+                            security_plan,
+                            max_read_line_span=self.cfg.security_tagging.tool_read_lines_max_span,
+                            max_output_text_chars=self.cfg.security_tagging.tool_output_text_max_chars,
+                        )
                         security_final = self.security_agent.finalize(rf.rel_path, lang, security_tool_out)
                         security_nodes = build_security_nodes_from_agent(
                             file_path=rf.rel_path,

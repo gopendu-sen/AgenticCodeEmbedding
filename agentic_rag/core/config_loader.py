@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -28,6 +28,55 @@ def _read_yaml(path: str) -> Dict[str, Any]:
         raise ConfigLoaderError("Config file root must be a mapping/object")
 
     return loaded
+
+
+def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = dict(base)
+    for key, value in override.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dicts(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _parse_extends_field(raw: Any, *, source_path: str) -> List[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        raise ConfigLoaderError(f"Invalid extends in {source_path}: expected string or list of strings")
+
+    out: List[str] = []
+    for idx, entry in enumerate(values):
+        if not isinstance(entry, str) or not entry.strip():
+            raise ConfigLoaderError(f"Invalid extends entry at index {idx} in {source_path}")
+        out.append(entry.strip())
+    return out
+
+
+def _load_yaml_with_extends(path: str, *, ancestry: Optional[List[str]] = None) -> Dict[str, Any]:
+    absolute_path = os.path.abspath(path)
+    parent_chain = list(ancestry or [])
+    if absolute_path in parent_chain:
+        cycle = " -> ".join(parent_chain + [absolute_path])
+        raise ConfigLoaderError(f"Config extends cycle detected: {cycle}")
+
+    data = _read_yaml(absolute_path)
+    extends_entries = _parse_extends_field(data.pop("extends", None), source_path=absolute_path)
+    merged: Dict[str, Any] = {}
+    config_dir = os.path.dirname(absolute_path)
+
+    for entry in extends_entries:
+        include_path = _resolve_path(entry, config_dir)
+        included = _load_yaml_with_extends(include_path, ancestry=parent_chain + [absolute_path])
+        merged = _deep_merge_dicts(merged, included)
+
+    return _deep_merge_dicts(merged, data)
 
 
 def _parse_bool(raw: str) -> bool:
@@ -138,7 +187,7 @@ def load_agentic_rag_config(config_path: str) -> AgenticRagConfig:
     absolute_config_path = os.path.abspath(config_path)
     config_dir = os.path.dirname(absolute_config_path)
 
-    config_data = _read_yaml(absolute_config_path)
+    config_data = _load_yaml_with_extends(absolute_config_path)
     _apply_env_overrides(config_data)
     _resolve_config_paths(config_data, config_dir)
 

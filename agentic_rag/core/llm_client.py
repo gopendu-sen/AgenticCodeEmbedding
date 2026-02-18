@@ -138,16 +138,24 @@ class LLMClient:
         # Exponential backoff with bounded growth.
         return min(12.0, self.retry_backoff_base_s * (2 ** max(0, retry_number - 1)))
 
-    def chat(self, messages: List[Dict[str, str]], temperature: float = 0) -> str:
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0,
+        max_tokens: Optional[int] = None,
+    ) -> str:
         url = f"{self.base_url}/chat/completions"
         payload = {"model": self.model, "messages": messages, "temperature": temperature}
+        if max_tokens is not None and int(max_tokens) > 0:
+            payload["max_tokens"] = int(max_tokens)
         started = time.perf_counter()
         logger.info(
-            "LLM REST call started: endpoint=%s model=%s stream=false messages=%d timeout_s=%d",
+            "LLM REST call started: endpoint=%s model=%s stream=false messages=%d timeout_s=%d max_tokens=%s",
             url,
             self.model,
             len(messages),
             self.timeout_s,
+            payload.get("max_tokens"),
         )
         attempts = self.retry_attempts + 1
         r: Optional[requests.Response] = None
@@ -387,8 +395,8 @@ class LLMClient:
                 raise ValueError("LLM JSON response must be a JSON object")
             return data
 
-    def chat_json(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        content = self.chat(messages, temperature=0)
+    def chat_json(self, messages: List[Dict[str, str]], max_tokens: Optional[int] = None) -> Dict[str, Any]:
+        content = self.chat(messages, temperature=0, max_tokens=max_tokens)
         try:
             return self._loads_best_effort(content)
         except Exception as first_exc:  # noqa: BLE001
@@ -403,7 +411,7 @@ class LLMClient:
                 },
                 {"role": "user", "content": content},
             ]
-            repaired = self.chat(repair_messages, temperature=0)
+            repaired = self.chat(repair_messages, temperature=0, max_tokens=max_tokens)
             return self._loads_best_effort(repaired)
 
     def probe(self) -> Dict[str, Any]:

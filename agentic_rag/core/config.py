@@ -79,6 +79,34 @@ class FallbackParseConfig(BaseModel):
     allowed_exts: List[str]
     important_dir_hints: List[str]
     important_keywords: List[str]
+    llm_auto_split_enabled: bool = True
+    llm_soft_input_tokens: int = 1400
+    llm_target_input_tokens: int = 850
+    llm_max_completion_tokens: int = 384
+    tool_read_lines_max_span: int = 120
+    tool_output_text_max_chars: int = 600
+    oom_retry_max_attempts: int = 2
+    oom_retry_shrink_ratio: float = 0.6
+
+    @model_validator(mode="after")
+    def _validate_parse_fallback_budgeting(self):
+        if self.llm_soft_input_tokens < 1:
+            raise ValueError("fallback.parse.llm_soft_input_tokens must be >= 1")
+        if self.llm_target_input_tokens < 1:
+            raise ValueError("fallback.parse.llm_target_input_tokens must be >= 1")
+        if self.llm_target_input_tokens > self.llm_soft_input_tokens:
+            raise ValueError("fallback.parse.llm_target_input_tokens must be <= llm_soft_input_tokens")
+        if self.llm_max_completion_tokens < 1:
+            raise ValueError("fallback.parse.llm_max_completion_tokens must be >= 1")
+        if self.tool_read_lines_max_span < 1:
+            raise ValueError("fallback.parse.tool_read_lines_max_span must be >= 1")
+        if self.tool_output_text_max_chars < 1:
+            raise ValueError("fallback.parse.tool_output_text_max_chars must be >= 1")
+        if self.oom_retry_max_attempts < 0:
+            raise ValueError("fallback.parse.oom_retry_max_attempts must be >= 0")
+        if self.oom_retry_shrink_ratio <= 0 or self.oom_retry_shrink_ratio >= 1:
+            raise ValueError("fallback.parse.oom_retry_shrink_ratio must be > 0 and < 1")
+        return self
 
 
 class FallbackStackConfig(BaseModel):
@@ -162,6 +190,14 @@ class SecurityTaggingConfig(BaseModel):
     supported_exts: List[str]
     llm_timeout_s: int
     max_header_lines: int
+    llm_auto_split_enabled: bool = True
+    llm_soft_input_tokens: int = 1400
+    llm_target_input_tokens: int = 850
+    llm_max_completion_tokens: int = 384
+    tool_read_lines_max_span: int = 120
+    tool_output_text_max_chars: int = 600
+    oom_retry_max_attempts: int = 2
+    oom_retry_shrink_ratio: float = 0.6
 
     @model_validator(mode="after")
     def _validate_security_tagging(self):
@@ -171,6 +207,22 @@ class SecurityTaggingConfig(BaseModel):
             raise ValueError("security_tagging.max_header_lines must be >= 1")
         if self.enabled and not self.supported_exts:
             raise ValueError("security_tagging.supported_exts must not be empty when security_tagging.enabled is true")
+        if self.llm_soft_input_tokens < 1:
+            raise ValueError("security_tagging.llm_soft_input_tokens must be >= 1")
+        if self.llm_target_input_tokens < 1:
+            raise ValueError("security_tagging.llm_target_input_tokens must be >= 1")
+        if self.llm_target_input_tokens > self.llm_soft_input_tokens:
+            raise ValueError("security_tagging.llm_target_input_tokens must be <= llm_soft_input_tokens")
+        if self.llm_max_completion_tokens < 1:
+            raise ValueError("security_tagging.llm_max_completion_tokens must be >= 1")
+        if self.tool_read_lines_max_span < 1:
+            raise ValueError("security_tagging.tool_read_lines_max_span must be >= 1")
+        if self.tool_output_text_max_chars < 1:
+            raise ValueError("security_tagging.tool_output_text_max_chars must be >= 1")
+        if self.oom_retry_max_attempts < 0:
+            raise ValueError("security_tagging.oom_retry_max_attempts must be >= 0")
+        if self.oom_retry_shrink_ratio <= 0 or self.oom_retry_shrink_ratio >= 1:
+            raise ValueError("security_tagging.oom_retry_shrink_ratio must be > 0 and < 1")
         return self
 
 
@@ -339,6 +391,13 @@ class EvaluationConfig(BaseModel):
     max_snippet_chars: int
     llm_timeout_s: int
     html_title: str
+    llm_auto_split_enabled: bool = True
+    llm_soft_input_tokens: int = 1400
+    llm_target_input_tokens: int = 900
+    llm_max_completion_tokens: int = 256
+    llm_batch_max_evidences: int = 2
+    oom_retry_max_attempts: int = 2
+    oom_retry_shrink_ratio: float = 0.6
 
     @model_validator(mode="after")
     def _validate_evaluation(self):
@@ -360,6 +419,20 @@ class EvaluationConfig(BaseModel):
             raise ValueError("evaluation.llm_timeout_s must be >= 1")
         if not self.html_title.strip():
             raise ValueError("evaluation.html_title must be a non-empty string")
+        if self.llm_soft_input_tokens < 1:
+            raise ValueError("evaluation.llm_soft_input_tokens must be >= 1")
+        if self.llm_target_input_tokens < 1:
+            raise ValueError("evaluation.llm_target_input_tokens must be >= 1")
+        if self.llm_target_input_tokens > self.llm_soft_input_tokens:
+            raise ValueError("evaluation.llm_target_input_tokens must be <= llm_soft_input_tokens")
+        if self.llm_max_completion_tokens < 1:
+            raise ValueError("evaluation.llm_max_completion_tokens must be >= 1")
+        if self.llm_batch_max_evidences < 1:
+            raise ValueError("evaluation.llm_batch_max_evidences must be >= 1")
+        if self.oom_retry_max_attempts < 0:
+            raise ValueError("evaluation.oom_retry_max_attempts must be >= 0")
+        if self.oom_retry_shrink_ratio <= 0 or self.oom_retry_shrink_ratio >= 1:
+            raise ValueError("evaluation.oom_retry_shrink_ratio must be > 0 and < 1")
         return self
 
 

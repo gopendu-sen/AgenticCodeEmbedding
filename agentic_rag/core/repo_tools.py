@@ -53,13 +53,31 @@ class RepoTools:
         with open(self._abs(rel_path), "r", encoding="utf-8", errors="ignore") as f:
             return f.read(limit)
 
-    def read_lines(self, file_path: str, start_line: int, end_line: int) -> Dict[str, Any]:
+    def read_lines(
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+        max_line_span: Optional[int] = None,
+    ) -> Dict[str, Any]:
         text = self.read_file(file_path)
         lines = text.splitlines()
         s = max(1, start_line)
         e = min(len(lines), end_line)
+        requested_end = e
+        if max_line_span is not None and int(max_line_span) > 0:
+            span = max(1, int(max_line_span))
+            if e - s + 1 > span:
+                e = min(len(lines), s + span - 1)
         snippet = "\n".join(lines[s - 1:e])
-        return {"file_path": file_path, "start_line": s, "end_line": e, "text": snippet}
+        return {
+            "file_path": file_path,
+            "start_line": s,
+            "end_line": e,
+            "text": snippet,
+            "requested_end_line": requested_end,
+            "line_span_capped": bool(e < requested_end),
+        }
 
     def search_in_file(self, file_path: str, pattern: str, max_hits: Optional[int] = None) -> Dict[str, Any]:
         rx = re.compile(pattern)
