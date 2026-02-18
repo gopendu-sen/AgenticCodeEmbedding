@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Code RAG Agentic RAG ingestion")
+    parser = argparse.ArgumentParser(description="Run Vyom ingestion")
     parser.add_argument("--config", default="config.yml", help="Path to config YAML file")
     parser.add_argument("--repo-name", required=True, help="Repo store tag used for embedding metadata")
     args = parser.parse_args()
@@ -35,7 +35,7 @@ def main():
     summary = orch.run()
     logger.info("Ingestion run completed")
 
-    print("\n=== Agentic RAG Summary ===")
+    print("\n=== Vyom Summary ===")
     for k, v in summary.items():
         print(f"{k}: {v}")
 

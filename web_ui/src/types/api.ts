@@ -101,6 +101,11 @@ export interface UIConfigResponse {
   show_sources: boolean;
   max_context_chunks: number;
   history_messages: number;
+  chat_api_host?: string;
+  chat_api_port?: number;
+  embedding_api_base_url?: string;
+  ui_host?: string;
+  ui_port?: number;
 }
 
 export interface EmbeddingJob {

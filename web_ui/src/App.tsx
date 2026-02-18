@@ -13,7 +13,7 @@ import type { UIConfigResponse } from "./types/api";
 
 
 const DEFAULT_UI_CONFIG: UIConfigResponse = {
-  title: "Code RAG Chatbot",
+  title: "Vyom",
   subtitle: "AuditPilot AI - Code Auditor Assistant and Audit Finding Generator.",
   assistant_greeting: "Hi, I can help you analyze code, trace controls, and generate audit-ready findings.",
   input_placeholder: "Ask a question about the repository...",

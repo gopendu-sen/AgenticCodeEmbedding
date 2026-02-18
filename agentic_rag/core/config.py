@@ -1,6 +1,6 @@
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class PathsConfig(BaseModel):
@@ -251,6 +251,21 @@ class ChatAPIConfig(BaseModel):
         return self
 
 
+class ChatUIConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = "0.0.0.0"
+    port: int = 5173
+
+    @model_validator(mode="after")
+    def _validate_ui(self):
+        if not self.host.strip():
+            raise ValueError("chat.ui.host must be a non-empty string")
+        if self.port < 1 or self.port > 65535:
+            raise ValueError("chat.ui.port must be in range 1..65535")
+        return self
+
+
 class ChatMemoryConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -285,6 +300,7 @@ class ChatConfig(BaseModel):
     system_prompt: str
     history_messages: int
     api: ChatAPIConfig
+    ui: ChatUIConfig = Field(default_factory=ChatUIConfig)
     memory: ChatMemoryConfig
     retrieval: ChatRetrievalConfig
     store_discovery: ChatStoreDiscoveryConfig

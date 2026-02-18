@@ -76,13 +76,14 @@ io_limits:
 
 llm:
   enabled: true
+  # base_url: "http://localhost:8000/v1"
   base_url: "http://localhost:11434/v1"
   model: "phi4-mini:latest"
   timeout_s: 600
 
 embedding:
-  #base_url: "http://localhost:8000/v1"
-  base_url: "http://127.0.0.1:8006/v1"
+  # base_url: "http://localhost:8001/v1"
+  base_url: "http://127.0.0.1:8026/v1"
   model: "snowflake-arctic-embed:110m"
   timeout_s: 600
   batch_size: 20
@@ -261,10 +262,10 @@ evaluation:
   max_candidates_per_item: 30
   max_snippet_chars: 1200
   llm_timeout_s: 120
-  html_title: "Code RAG Evaluation Report"
+  html_title: "Vyom Evaluation Report"
 
 chat:
-  title: "Code RAG Chatbot"
+  title: "Vyom"
   subtitle: "AuditPilot AI - Code Auditor Assistant and Audit Finding Generator."
   assistant_greeting: "Hi, I can help you analyze code, trace controls, and generate audit-ready findings."
   input_placeholder: "Ask a question about the repository..."
@@ -273,12 +274,15 @@ chat:
   history_messages: 12
   api:
     host: "0.0.0.0"
-    port: 8005
+    port: 8025
     cors_allowed_origins:
       - "http://localhost:5173"
       - "http://127.0.0.1:5173"
       - "http://localhost:4173"
       - "http://127.0.0.1:4173"
+  ui:
+    host: "0.0.0.0"
+    port: 5173
   memory:
     sqlite_path: "./out_index/chat_memory.db"
     max_history_messages: 20

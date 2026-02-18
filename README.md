@@ -1,4 +1,4 @@
-# Code RAG Agentic RAG
+# Vyom
 
 Agentic code-ingestion and retrieval system for multi-repo RAG.
 It indexes source code into Chroma with repo tags, then serves citation-grounded chat through FastAPI + React.
@@ -29,12 +29,12 @@ It indexes source code into Chroma with repo tags, then serves citation-grounded
 ## Runtime Architecture
 ```text
 config.chat.yml
-  -> chat_module.api (FastAPI :8005)
+  -> chat_module.api (FastAPI :8025)
        -> retreiving_module.StoreRetriever (retrieval + store discovery)
-            -> ChromaStore + EmbeddingClient(base_url=http://127.0.0.1:8006/v1)
+            -> ChromaStore + EmbeddingClient(base_url=http://127.0.0.1:8026/v1)
        -> SessionService/SessionStore (SQLite memory)
 config.embedding.yml
-  -> ops_module.api (FastAPI :8006)
+  -> ops_module.api (FastAPI :8026)
        -> retreiving_module.StoreRetriever (embedding/evaluation jobs + rules)
        -> /v1/embeddings passthrough to upstream embedding provider
   -> web_ui (React SPA)
@@ -126,13 +126,14 @@ cd ..
 
 ## Run (Step by Step)
 1. Keep `config.yml` for backward compatibility, then use split configs:
-- `config.chat.yml`: chat service config (with `embedding.base_url: "http://127.0.0.1:8006/v1"`).
+- `config.chat.yml`: chat service config (with `embedding.base_url: "http://127.0.0.1:8026/v1"`).
   - Chat bind settings are driven by YAML: `chat.api.host` and `chat.api.port`.
+  - UI dev-server bind settings are driven by YAML: `chat.ui.host` and `chat.ui.port`.
 - `config.embedding.yml`: ops service config (with upstream embedding provider in `embedding.base_url`).
 
 2. Start ops service (embedding/evaluation + `/v1/embeddings` proxy):
 ```bash
-python3 -m ops_module.api --config config.embedding.yml --port 8006
+python3 -m ops_module.api --config config.embedding.yml
 ```
 
 3. Start chat service:
@@ -145,14 +146,15 @@ python3 -m chat_module.api --config config.chat.yml
 cd web_ui
 npm run dev
 ```
-Vite proxy defaults:
-- chat target: `http://127.0.0.1:8005`
-- ops target: `http://127.0.0.1:8006`
+Vite reads proxy targets and GUI port from YAML:
+- chat target: `config.chat.yml -> chat.api.host/chat.api.port` (default `127.0.0.1:8025`)
+- ops target: `config.embedding.yml -> chat.api.host/chat.api.port` (default `127.0.0.1:8026`)
+- GUI server: `config.chat.yml -> chat.ui.host/chat.ui.port` (default `0.0.0.0:5173`)
 
 Optional overrides:
 ```bash
-VITE_CHAT_PROXY_TARGET=http://127.0.0.1:8005 \
-VITE_EMBEDDING_PROXY_TARGET=http://127.0.0.1:8006 \
+VITE_CHAT_PROXY_TARGET=http://127.0.0.1:8025 \
+VITE_EMBEDDING_PROXY_TARGET=http://127.0.0.1:8026 \
 npm run dev
 ```
 Legacy `VITE_PROXY_TARGET` is still supported for chat proxy fallback.
@@ -162,6 +164,11 @@ Frontend API base envs (optional):
 
 5. Open UI:
 - `http://localhost:5173`
+
+Windows one-click startup:
+```bat
+start_apps.bat
+```
 
 6. Start embedding from GUI:
 - In **Embedding Jobs** panel:
@@ -390,11 +397,11 @@ Embedding text payload is enriched with selected metadata when present:
 - if `source_count=0`, re-embed repo and retry
 
 5. Vite proxy `ECONNREFUSED`:
-- chat routes (`/ui-config`, `/stores`, `/sessions`, `/chat`) require chat service on `127.0.0.1:8005`
-- ops routes (`/embedding/*`, `/evaluation/*`, `/v1/embeddings`) require ops service on `127.0.0.1:8006`
+- chat routes (`/ui-config`, `/stores`, `/sessions`, `/chat`) require chat service on `127.0.0.1:8025`
+- ops routes (`/embedding/*`, `/evaluation/*`, `/v1/embeddings`) require ops service on `127.0.0.1:8026`
 - start both services:
 ```bash
-python3 -m ops_module.api --config config.embedding.yml --port 8006
+python3 -m ops_module.api --config config.embedding.yml
 python3 -m chat_module.api --config config.chat.yml
 ```
 - then start/restart frontend:

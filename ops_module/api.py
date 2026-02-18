@@ -112,7 +112,7 @@ def _normalize_embedding_input(raw_input: Any) -> List[str]:
 def create_app(cfg: AgenticRagConfig, *, config_path: str) -> FastAPI:
     retriever = StoreRetriever.from_config(cfg, config_path=config_path)
 
-    app = FastAPI(title="Agentic RAG Ops API", version="1.0.0")
+    app = FastAPI(title="Vyom Ops API", version="1.0.0")
     app.state.cfg = cfg
     app.state.retriever = retriever
 
@@ -391,10 +391,10 @@ def create_app(cfg: AgenticRagConfig, *, config_path: str) -> FastAPI:
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Agentic RAG ops backend")
-    parser.add_argument("--config", default="config.yml", help="Path to Agentic RAG config file")
+    parser = argparse.ArgumentParser(description="Run Vyom ops backend")
+    parser.add_argument("--config", default="config.yml", help="Path to Vyom config file")
     parser.add_argument("--host", help="Override host binding (defaults to chat.api.host in config)")
-    parser.add_argument("--port", type=int, help="Override port binding (defaults to 8006)")
+    parser.add_argument("--port", type=int, help="Override port binding (defaults to chat.api.port in config)")
     return parser.parse_args(argv)
 
 
@@ -410,16 +410,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
 
     logger.info(
-        "Loaded ops config: config=%s embedding_upstream=%s embedding_model=%s reports_dir=%s",
+        "Loaded ops config: config=%s embedding_upstream=%s embedding_model=%s bind=%s:%d reports_dir=%s",
         args.config,
         cfg.embedding.base_url,
         cfg.embedding.model,
+        cfg.chat.api.host,
+        cfg.chat.api.port,
         cfg.paths.reports_dir,
     )
 
     app = create_app(cfg, config_path=args.config)
     host = args.host or cfg.chat.api.host
-    port = args.port if args.port is not None else 8006
+    port = args.port if args.port is not None else cfg.chat.api.port
     logger.info("Starting ops API: host=%s port=%d config=%s", host, port, args.config)
     uvicorn.run(app, host=host, port=port)
 

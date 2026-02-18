@@ -76,7 +76,7 @@ def create_app(cfg: AgenticRagConfig, *, config_path: str) -> FastAPI:
     retriever = StoreRetriever.from_config(cfg, config_path=config_path)
     sessions = _build_session_service(cfg)
 
-    app = FastAPI(title="Agentic RAG Chat API", version="1.0.0")
+    app = FastAPI(title="Vyom Chat API", version="1.0.0")
     app.state.cfg = cfg
     app.state.retriever = retriever
     app.state.sessions = sessions
@@ -141,6 +141,11 @@ def create_app(cfg: AgenticRagConfig, *, config_path: str) -> FastAPI:
             "show_sources": chat_cfg.show_sources,
             "max_context_chunks": chat_cfg.max_context_chunks,
             "history_messages": chat_cfg.memory.max_history_messages,
+            "chat_api_host": chat_cfg.api.host,
+            "chat_api_port": chat_cfg.api.port,
+            "embedding_api_base_url": cfg.embedding.base_url,
+            "ui_host": chat_cfg.ui.host,
+            "ui_port": chat_cfg.ui.port,
         }
 
     @app.get("/stores")
@@ -270,8 +275,8 @@ def create_app(cfg: AgenticRagConfig, *, config_path: str) -> FastAPI:
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Agentic RAG chat backend")
-    parser.add_argument("--config", default="config.yml", help="Path to Agentic RAG config file")
+    parser = argparse.ArgumentParser(description="Run Vyom chat backend")
+    parser.add_argument("--config", default="config.yml", help="Path to Vyom config file")
     return parser.parse_args(argv)
 
 

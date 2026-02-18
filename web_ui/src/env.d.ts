@@ -7,6 +7,8 @@ interface ImportMetaEnv {
   readonly VITE_PROXY_TARGET?: string;
   readonly VITE_CHAT_PROXY_TARGET?: string;
   readonly VITE_EMBEDDING_PROXY_TARGET?: string;
+  readonly VITE_GUI_HOST?: string;
+  readonly VITE_GUI_PORT?: string;
 }
 
 interface ImportMeta {
