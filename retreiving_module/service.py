@@ -510,6 +510,53 @@ class StoreRetriever:
             return True
         return True
 
+    @staticmethod
+    def _tail_text_file(path: str, *, max_lines: int = 80, max_chars: int = 4000) -> str:
+        if not path or not os.path.exists(path):
+            return ""
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()
+        except Exception:  # noqa: BLE001
+            return ""
+        tail = "".join(lines[-max_lines:]).strip()
+        if len(tail) > max_chars:
+            tail = tail[-max_chars:]
+        return tail
+
+    @staticmethod
+    def _extract_worker_error_hint(log_tail: str) -> str:
+        if not log_tail:
+            return ""
+        lines = [line.strip() for line in log_tail.splitlines() if line.strip()]
+        if not lines:
+            return ""
+
+        for line in reversed(lines):
+            if "ModuleNotFoundError:" in line or "ImportError:" in line:
+                return line
+            if "No module named" in line:
+                return line
+
+        for line in reversed(lines):
+            lowered = line.lower()
+            if "error:" in lowered or "exception:" in lowered:
+                return line
+
+        return lines[-1]
+
+    def _build_worker_failure_error(
+        self,
+        *,
+        default_error: str,
+        log_path: str,
+    ) -> Tuple[str, str]:
+        log_tail = self._tail_text_file(log_path)
+        hint = self._extract_worker_error_hint(log_tail)
+        if hint and hint.lower() not in default_error.lower():
+            return f"{default_error}: {hint}", log_tail
+        return default_error, log_tail
+
     def _job_status_path(self, job_id: str) -> str:
         return os.path.join(self.embedding_jobs_dir, f"{job_id}.json")
 
@@ -560,6 +607,11 @@ class StoreRetriever:
             pid = int(pid_raw) if pid_raw is not None else 0
         except (TypeError, ValueError):
             pid = 0
+        exit_code_raw = job.get("worker_exit_code")
+        try:
+            worker_exit_code = int(exit_code_raw) if exit_code_raw is not None else None
+        except (TypeError, ValueError):
+            worker_exit_code = None
 
         if status in {"completed", "completed_partial", "failed"}:
             return job
@@ -573,11 +625,31 @@ class StoreRetriever:
         job["status"] = "failed"
         job["stage"] = "failed"
         if not str(job.get("error", "")).strip():
-            job["error"] = "Embedding worker process exited unexpectedly"
+            default_error = "Embedding worker process exited unexpectedly"
+            if worker_exit_code is not None:
+                default_error = f"Embedding worker exited unexpectedly (exit_code={worker_exit_code})"
+            error_text, log_tail = self._build_worker_failure_error(
+                default_error=default_error,
+                log_path=str(job.get("log_path", "")).strip(),
+            )
+            job["error"] = error_text
+            if log_tail:
+                job["last_log_tail"] = log_tail
+        elif str(job.get("log_path", "")).strip():
+            log_tail = self._tail_text_file(str(job.get("log_path", "")).strip())
+            if log_tail:
+                job["last_log_tail"] = log_tail
         if not str(job.get("finished_at_utc", "")).strip():
             job["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
         job["partial"] = bool(job.get("partial", False))
         job["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+        logger.error(
+            "Embedding worker marked failed: job_id=%s pid=%s exit_code=%s error=%s",
+            job.get("job_id"),
+            pid,
+            worker_exit_code,
+            job.get("error"),
+        )
         self._write_job(job)
         return job
 
@@ -591,6 +663,21 @@ class StoreRetriever:
 
         job_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
         created_at = datetime.now(timezone.utc).isoformat()
+        cmd = [
+            sys.executable,
+            "-m",
+            "retreiving_module.embedding_worker",
+            "--config",
+            self.config_path,
+            "--repo-path",
+            resolved_repo_path,
+            "--repo-name",
+            clean_repo_name,
+            "--job-id",
+            job_id,
+            "--status-path",
+            self._job_status_path(job_id),
+        ]
         job = {
             "job_id": job_id,
             "status": "starting",
@@ -608,51 +695,53 @@ class StoreRetriever:
             "partial": False,
             "report_path": "",
             "log_path": self._job_log_path(job_id),
+            "worker_command": cmd,
+            "worker_cwd": self.project_root,
+            "worker_exit_code": None,
+            "last_log_tail": "",
         }
         self._write_job(job)
-
-        cmd = [
-            sys.executable,
-            "-m",
-            "retreiving_module.embedding_worker",
-            "--config",
-            self.config_path,
-            "--repo-path",
-            resolved_repo_path,
-            "--repo-name",
-            clean_repo_name,
-            "--job-id",
-            job_id,
-            "--status-path",
-            self._job_status_path(job_id),
-        ]
         logger.info(
-            "Starting embedding background job: job_id=%s repo_name=%s repo_path=%s",
+            "Starting embedding background job: job_id=%s repo_name=%s repo_path=%s cwd=%s cmd=%s",
             job_id,
             clean_repo_name,
             resolved_repo_path,
+            self.project_root,
+            cmd,
         )
+
+        popen_kwargs: Dict[str, Any] = {
+            "stdout": None,
+            "stderr": subprocess.STDOUT,
+            "cwd": self.project_root,
+        }
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if creationflags:
+                popen_kwargs["creationflags"] = creationflags
+        else:
+            popen_kwargs["start_new_session"] = True
 
         try:
             with open(self._job_log_path(job_id), "a", encoding="utf-8") as log_handle:
+                popen_kwargs["stdout"] = log_handle
                 process = subprocess.Popen(  # noqa: S603
                     cmd,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    cwd=self.project_root,
+                    **popen_kwargs,
                 )
         except Exception as exc:  # noqa: BLE001
             err_text = str(exc)
             logger.exception(
-                "Failed to start embedding background job: job_id=%s repo_name=%s error=%s",
+                "Failed to start embedding background job: job_id=%s repo_name=%s cwd=%s cmd=%s error=%s",
                 job_id,
                 clean_repo_name,
+                self.project_root,
+                cmd,
                 err_text,
             )
             job["status"] = "failed"
             job["stage"] = "failed"
-            job["error"] = f"Failed to spawn embedding worker: {err_text}"
+            job["error"] = f"Failed to spawn embedding worker subprocess: {err_text}"
             job["pid"] = None
             job["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
             job["partial"] = False
@@ -661,9 +750,38 @@ class StoreRetriever:
             self._write_job(job)
             return job
 
+        # Worker import/config errors can terminate immediately; capture that explicitly.
+        time.sleep(0.2)
+        early_exit_code = process.poll()
+        if early_exit_code is not None:
+            default_error = f"Embedding worker exited immediately after spawn (exit_code={early_exit_code})"
+            error_text, log_tail = self._build_worker_failure_error(
+                default_error=default_error,
+                log_path=self._job_log_path(job_id),
+            )
+            job["status"] = "failed"
+            job["stage"] = "failed"
+            job["error"] = error_text
+            job["pid"] = process.pid
+            job["worker_exit_code"] = early_exit_code
+            job["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+            job["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+            if log_tail:
+                job["last_log_tail"] = log_tail
+            logger.error(
+                "Embedding worker exited immediately: job_id=%s pid=%s exit_code=%s error=%s",
+                job_id,
+                process.pid,
+                early_exit_code,
+                error_text,
+            )
+            self._write_job(job)
+            return job
+
         job["status"] = "running"
         job["stage"] = "init"
         job["pid"] = process.pid
+        job["worker_exit_code"] = None
         job["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
         self._write_job(job)
         return job
@@ -835,6 +953,8 @@ class StoreRetriever:
 
     def _refresh_evaluation_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
         status = str(job.get("status", "")).strip().lower()
+        if status in {"completed", "completed_partial", "failed"}:
+            return job
         if status != "running":
             return job
         pid_raw = job.get("pid")
@@ -842,15 +962,40 @@ class StoreRetriever:
             pid = int(pid_raw) if pid_raw is not None else 0
         except (TypeError, ValueError):
             pid = 0
+        exit_code_raw = job.get("worker_exit_code")
+        try:
+            worker_exit_code = int(exit_code_raw) if exit_code_raw is not None else None
+        except (TypeError, ValueError):
+            worker_exit_code = None
         if pid > 0 and self._is_pid_alive(pid):
             return job
 
         job["status"] = "failed"
         if not str(job.get("error", "")).strip():
-            job["error"] = "Evaluation worker process exited unexpectedly"
+            default_error = "Evaluation worker process exited unexpectedly"
+            if worker_exit_code is not None:
+                default_error = f"Evaluation worker exited unexpectedly (exit_code={worker_exit_code})"
+            error_text, log_tail = self._build_worker_failure_error(
+                default_error=default_error,
+                log_path=str(job.get("log_path", "")).strip(),
+            )
+            job["error"] = error_text
+            if log_tail:
+                job["last_log_tail"] = log_tail
+        elif str(job.get("log_path", "")).strip():
+            log_tail = self._tail_text_file(str(job.get("log_path", "")).strip())
+            if log_tail:
+                job["last_log_tail"] = log_tail
         if not str(job.get("finished_at_utc", "")).strip():
             job["finished_at_utc"] = self._utc_now()
         job["partial"] = bool(job.get("partial", False))
+        logger.error(
+            "Evaluation worker marked failed: job_id=%s pid=%s exit_code=%s error=%s",
+            job.get("job_id"),
+            pid,
+            worker_exit_code,
+            job.get("error"),
+        )
         self._write_evaluation_job(job)
         return job
 
@@ -865,6 +1010,21 @@ class StoreRetriever:
         self._ensure_evaluation_rules_file()
         job_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
         created_at = self._utc_now()
+        cmd = [
+            sys.executable,
+            "-m",
+            "retreiving_module.evaluation_worker",
+            "--config",
+            self.config_path,
+            "--repo-path",
+            resolved_repo_path,
+            "--repo-name",
+            clean_repo_name,
+            "--job-id",
+            job_id,
+            "--status-path",
+            self._evaluation_job_status_path(job_id),
+        ]
         job = {
             "job_id": job_id,
             "status": "starting",
@@ -884,50 +1044,52 @@ class StoreRetriever:
             "log_path": self._evaluation_job_log_path(job_id),
             "pid": None,
             "summary": None,
+            "worker_command": cmd,
+            "worker_cwd": self.project_root,
+            "worker_exit_code": None,
+            "last_log_tail": "",
         }
         self._write_evaluation_job(job)
-
-        cmd = [
-            sys.executable,
-            "-m",
-            "retreiving_module.evaluation_worker",
-            "--config",
-            self.config_path,
-            "--repo-path",
-            resolved_repo_path,
-            "--repo-name",
-            clean_repo_name,
-            "--job-id",
-            job_id,
-            "--status-path",
-            self._evaluation_job_status_path(job_id),
-        ]
         logger.info(
-            "Starting evaluation background job: job_id=%s repo_name=%s repo_path=%s",
+            "Starting evaluation background job: job_id=%s repo_name=%s repo_path=%s cwd=%s cmd=%s",
             job_id,
             clean_repo_name,
             resolved_repo_path,
+            self.project_root,
+            cmd,
         )
+
+        popen_kwargs: Dict[str, Any] = {
+            "stdout": None,
+            "stderr": subprocess.STDOUT,
+            "cwd": self.project_root,
+        }
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if creationflags:
+                popen_kwargs["creationflags"] = creationflags
+        else:
+            popen_kwargs["start_new_session"] = True
 
         try:
             with open(self._evaluation_job_log_path(job_id), "a", encoding="utf-8") as log_handle:
+                popen_kwargs["stdout"] = log_handle
                 process = subprocess.Popen(  # noqa: S603
                     cmd,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    cwd=self.project_root,
+                    **popen_kwargs,
                 )
         except Exception as exc:  # noqa: BLE001
             err_text = str(exc)
             logger.exception(
-                "Failed to start evaluation background job: job_id=%s repo_name=%s error=%s",
+                "Failed to start evaluation background job: job_id=%s repo_name=%s cwd=%s cmd=%s error=%s",
                 job_id,
                 clean_repo_name,
+                self.project_root,
+                cmd,
                 err_text,
             )
             job["status"] = "failed"
-            job["error"] = f"Failed to spawn evaluation worker: {err_text}"
+            job["error"] = f"Failed to spawn evaluation worker subprocess: {err_text}"
             job["pid"] = None
             job["finished_at_utc"] = self._utc_now()
             job["partial"] = False
@@ -935,8 +1097,35 @@ class StoreRetriever:
             self._write_evaluation_job(job)
             return job
 
+        # Worker import/config errors can terminate immediately; capture that explicitly.
+        time.sleep(0.2)
+        early_exit_code = process.poll()
+        if early_exit_code is not None:
+            default_error = f"Evaluation worker exited immediately after spawn (exit_code={early_exit_code})"
+            error_text, log_tail = self._build_worker_failure_error(
+                default_error=default_error,
+                log_path=self._evaluation_job_log_path(job_id),
+            )
+            job["status"] = "failed"
+            job["error"] = error_text
+            job["pid"] = process.pid
+            job["worker_exit_code"] = early_exit_code
+            job["finished_at_utc"] = self._utc_now()
+            if log_tail:
+                job["last_log_tail"] = log_tail
+            logger.error(
+                "Evaluation worker exited immediately: job_id=%s pid=%s exit_code=%s error=%s",
+                job_id,
+                process.pid,
+                early_exit_code,
+                error_text,
+            )
+            self._write_evaluation_job(job)
+            return job
+
         job["status"] = "running"
         job["pid"] = process.pid
+        job["worker_exit_code"] = None
         job["started_at_utc"] = self._utc_now()
         self._write_evaluation_job(job)
         return job

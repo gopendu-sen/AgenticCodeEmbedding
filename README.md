@@ -388,6 +388,11 @@ Embedding text payload is enriched with selected metadata when present:
 2. `ModuleNotFoundError: fastapi`:
 - install Python dependencies: `pip install -r requirements.txt`
 - ensure you are in the same Python env used to run both services
+- on Windows, prefer local venv:
+  - `py -3 -m venv .venv`
+  - `.venv\Scripts\activate`
+  - `python -m pip install -r requirements.txt`
+  - then run `start_apps.bat` (it now prefers `.venv\Scripts\python.exe` automatically)
 
 3. CORS errors from browser:
 - add frontend origin to `chat.api.cors_allowed_origins` in both `config.chat.yml` and `config.embedding.yml`
