@@ -391,6 +391,14 @@ class EvaluationConfig(BaseModel):
     max_snippet_chars: int
     llm_timeout_s: int
     html_title: str
+    recall_bias_enabled: bool = True
+    force_detect_min_strong_hits: int = 1
+    weak_hits_min_for_review: int = 1
+    ignore_false_positive_for_downgrade: bool = True
+    retrieval_result_cap_per_query: int = 20
+    retrieval_second_pass_enabled: bool = True
+    retrieval_second_pass_min_candidates: int = 8
+    retrieval_second_pass_multiplier: float = 2.0
     llm_auto_split_enabled: bool = True
     llm_soft_input_tokens: int = 1400
     llm_target_input_tokens: int = 900
@@ -419,6 +427,16 @@ class EvaluationConfig(BaseModel):
             raise ValueError("evaluation.llm_timeout_s must be >= 1")
         if not self.html_title.strip():
             raise ValueError("evaluation.html_title must be a non-empty string")
+        if self.force_detect_min_strong_hits < 1:
+            raise ValueError("evaluation.force_detect_min_strong_hits must be >= 1")
+        if self.weak_hits_min_for_review < 1:
+            raise ValueError("evaluation.weak_hits_min_for_review must be >= 1")
+        if self.retrieval_result_cap_per_query < 1:
+            raise ValueError("evaluation.retrieval_result_cap_per_query must be >= 1")
+        if self.retrieval_second_pass_min_candidates < 1:
+            raise ValueError("evaluation.retrieval_second_pass_min_candidates must be >= 1")
+        if self.retrieval_second_pass_multiplier < 1.0:
+            raise ValueError("evaluation.retrieval_second_pass_multiplier must be >= 1.0")
         if self.llm_soft_input_tokens < 1:
             raise ValueError("evaluation.llm_soft_input_tokens must be >= 1")
         if self.llm_target_input_tokens < 1:

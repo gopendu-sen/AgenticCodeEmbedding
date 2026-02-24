@@ -273,11 +273,19 @@ evaluation:
   jobs_dir: "./reports/evaluation_jobs"
   reports_dir: "./reports/evaluations"
   log_jsonl_path: "./reports/evaluation_log.jsonl"
-  evidence_per_item: 5
-  max_candidates_per_item: 30
+  evidence_per_item: 8
+  max_candidates_per_item: 60
   max_snippet_chars: 1200
   llm_timeout_s: 120
   html_title: "Vyom Evaluation Report"
+  recall_bias_enabled: true
+  force_detect_min_strong_hits: 1
+  weak_hits_min_for_review: 1
+  ignore_false_positive_for_downgrade: true
+  retrieval_result_cap_per_query: 20
+  retrieval_second_pass_enabled: true
+  retrieval_second_pass_min_candidates: 8
+  retrieval_second_pass_multiplier: 2.0
   llm_auto_split_enabled: true
   llm_soft_input_tokens: 1400
   llm_target_input_tokens: 900

@@ -29,6 +29,8 @@ from agentic_rag.embedding.client import EmbeddingClient
 logger = logging.getLogger(__name__)
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
+_CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _CITATION_RULES = (
     "CITATION RULES:\n"
     "- Use only bracketed numeric citations like [1], [2], [3].\n"
@@ -1196,14 +1198,122 @@ class StoreRetriever:
             return fallback_text[: self.cfg.evaluation.max_snippet_chars], False
 
     @staticmethod
-    def _match_signals(signals: List[str], evidence_text: str) -> List[str]:
-        haystack = evidence_text.lower()
+    def _normalize_signal_phrase(text: str) -> str:
+        value = str(text or "")
+        if not value.strip():
+            return ""
+        expanded = _CAMEL_BOUNDARY_RE.sub(r"\1 \2", value)
+        expanded = expanded.replace("_", " ").replace("-", " ").replace("/", " ")
+        lowered = expanded.lower()
+        return _NON_ALNUM_RE.sub(" ", lowered).strip()
+
+    @classmethod
+    def _match_signals(cls, signals: List[str], evidence_text: str) -> List[str]:
+        haystack_norm = cls._normalize_signal_phrase(evidence_text)
+        haystack_norm_padded = f" {haystack_norm} " if haystack_norm else ""
         matched: List[str] = []
         for signal in signals:
-            token = signal.strip().lower()
-            if token and token in haystack:
-                matched.append(signal)
+            raw_signal = str(signal or "").strip()
+            if not raw_signal:
+                continue
+            normalized_signal = cls._normalize_signal_phrase(raw_signal)
+            if not normalized_signal:
+                continue
+            if haystack_norm_padded and f" {normalized_signal} " in haystack_norm_padded:
+                matched.append(raw_signal)
         return matched
+
+    @staticmethod
+    def _evaluation_candidate_key(src: Dict[str, Any]) -> str:
+        meta = src.get("metadata") or {}
+        return "|".join(
+            [
+                str(meta.get("file_path", "")),
+                str(meta.get("start_line", "")),
+                str(meta.get("end_line", "")),
+                str(meta.get("node_type", "")),
+            ]
+        )
+
+    @staticmethod
+    def _evaluation_candidate_match_text(src: Dict[str, Any]) -> str:
+        meta = src.get("metadata") or {}
+        return "\n".join(
+            [
+                str(meta.get("file_path", "")),
+                str(meta.get("symbol", "")),
+                str(meta.get("node_type", "")),
+                str(src.get("document", "")),
+            ]
+        )
+
+    def _merge_evaluation_candidates(
+        self,
+        candidate_map: Dict[str, Dict[str, Any]],
+        sources: List[Dict[str, Any]],
+    ) -> None:
+        for src in sources:
+            key = self._evaluation_candidate_key(src)
+            if not key.strip("|"):
+                continue
+            existing = candidate_map.get(key)
+            if existing is None or float(src.get("distance", 1e9)) < float(existing.get("distance", 1e9)):
+                candidate_map[key] = src
+
+    def _score_evaluation_candidates(
+        self,
+        *,
+        candidate_map: Dict[str, Dict[str, Any]],
+        rule: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        scored_candidates: List[Tuple[float, Dict[str, Any]]] = []
+        for src in candidate_map.values():
+            match_text = self._evaluation_candidate_match_text(src)
+            strong_hits = self._match_signals(rule.get("strong_signals", []), match_text)
+            weak_hits = self._match_signals(rule.get("weak_signals", []), match_text)
+            overlap_score = (len(strong_hits) * 2.0) + len(weak_hits)
+            distance = float(src.get("distance", 1e9))
+            score = overlap_score - distance
+            scored_candidates.append((score, src))
+
+        scored_candidates.sort(key=lambda item: item[0], reverse=True)
+        max_candidates = max(1, int(self.cfg.evaluation.max_candidates_per_item))
+        return [src for _, src in scored_candidates[:max_candidates]]
+
+    def _candidate_signal_hits(
+        self,
+        *,
+        rule: Dict[str, Any],
+        candidates: List[Dict[str, Any]],
+    ) -> Tuple[List[str], List[str]]:
+        candidate_text = "\n".join(self._evaluation_candidate_match_text(src) for src in candidates)
+        matched_strong = self._match_signals(rule.get("strong_signals", []), candidate_text)
+        matched_weak = self._match_signals(rule.get("weak_signals", []), candidate_text)
+        return matched_strong, matched_weak
+
+    def _evaluation_second_pass_limits(self) -> Dict[str, int]:
+        multiplier = max(1.0, float(self.cfg.evaluation.retrieval_second_pass_multiplier))
+        base_budget = max(1, int(self.cfg.chat.retrieval.base_top_k))
+        boosted_budget = max(1, int(round(base_budget * multiplier)))
+        limits: Dict[str, int] = {}
+        for key in self.base_collection_keys + self.audit_collection_keys:
+            if key in self.collection_map:
+                limits[key] = boosted_budget
+        return limits
+
+    def _should_run_second_pass(
+        self,
+        *,
+        candidate_count: int,
+        matched_strong: List[str],
+        matched_weak: List[str],
+    ) -> bool:
+        if not self.cfg.evaluation.retrieval_second_pass_enabled:
+            return False
+        min_candidates = max(1, int(self.cfg.evaluation.retrieval_second_pass_min_candidates))
+        if candidate_count < min_candidates:
+            return True
+        return not matched_strong and not matched_weak
 
     @staticmethod
     def _coerce_float(value: Any, default: float = 0.0) -> float:
@@ -1281,6 +1391,90 @@ class StoreRetriever:
             "matched_weak_signals": self._normalize_eval_str_list(llm_json.get("matched_weak_signals")) or matched_weak,
             "false_positive_risks": self._normalize_eval_str_list(llm_json.get("false_positive_risks")) or matched_false_pos,
         }
+
+    def _apply_recall_bias(
+        self,
+        *,
+        rule_id: str,
+        decision: Dict[str, Any],
+        matched_strong: List[str],
+        matched_weak: List[str],
+        matched_false_pos: List[str],
+    ) -> Dict[str, Any]:
+        out = dict(decision)
+        original_status = self._normalize_eval_status(out.get("status"))
+        status = original_status
+        reason = str(out.get("reason", "")).strip()
+        if reason.lower() in {"none", "null", "n/a"}:
+            reason = ""
+        confidence = max(0.0, min(1.0, self._coerce_float(out.get("confidence"), 0.0)))
+        policy = str(out.get("decision_policy", "")).strip() or "llm"
+
+        merged_strong = self._normalize_eval_str_list(
+            self._normalize_eval_str_list(out.get("matched_strong_signals")) + list(matched_strong)
+        )
+        merged_weak = self._normalize_eval_str_list(
+            self._normalize_eval_str_list(out.get("matched_weak_signals")) + list(matched_weak)
+        )
+        merged_false = self._normalize_eval_str_list(
+            self._normalize_eval_str_list(out.get("false_positive_risks")) + list(matched_false_pos)
+        )
+
+        if self.cfg.evaluation.recall_bias_enabled:
+            strong_threshold = max(1, int(self.cfg.evaluation.force_detect_min_strong_hits))
+            weak_threshold = max(1, int(self.cfg.evaluation.weak_hits_min_for_review))
+            if len(merged_strong) >= strong_threshold and status != "Detected":
+                status = "Detected"
+                policy = "recall_override_strong"
+                confidence = max(confidence, 0.75)
+            elif not merged_strong and len(merged_weak) >= weak_threshold and status == "Not Detected":
+                status = "Needs Review"
+                policy = "recall_override_weak"
+                confidence = max(confidence, 0.5)
+
+        if status == "Detected" and merged_false and self.cfg.evaluation.ignore_false_positive_for_downgrade:
+            suffix = (
+                f" False-positive signal matches={len(merged_false)} "
+                "(recall policy keeps status as Detected)."
+            )
+            reason = (reason.rstrip(".") + "." if reason else "") + suffix
+
+        if not reason:
+            reason = (
+                f"Deterministic summary for rule {rule_id}: status={status}, "
+                f"strong={len(merged_strong)}, weak={len(merged_weak)}, "
+                f"false_positive={len(merged_false)}, policy={policy}."
+            )
+        elif policy in {"recall_override_strong", "recall_override_weak"}:
+            reason = (
+                f"Recall override applied ({policy}) for rule {rule_id}: "
+                f"strong={len(merged_strong)} weak={len(merged_weak)} false_positive={len(merged_false)}. "
+                f"{reason}"
+            )
+
+        if status != original_status:
+            logger.info(
+                (
+                    "Evaluation recall override applied: rule_id=%s from=%s to=%s policy=%s "
+                    "strong=%d weak=%d false_positive=%d"
+                ),
+                rule_id,
+                original_status,
+                status,
+                policy,
+                len(merged_strong),
+                len(merged_weak),
+                len(merged_false),
+            )
+
+        out["status"] = status
+        out["reason"] = reason
+        out["confidence"] = confidence
+        out["decision_policy"] = policy
+        out["matched_strong_signals"] = merged_strong
+        out["matched_weak_signals"] = merged_weak
+        out["false_positive_risks"] = merged_false
+        return out
 
     def _call_evaluation_llm_json(
         self,
@@ -1415,6 +1609,7 @@ class StoreRetriever:
             "matched_strong_signals": merged_strong,
             "matched_weak_signals": merged_weak,
             "false_positive_risks": merged_false,
+            "decision_policy": "deterministic_fallback",
         }
 
     def _evaluate_rule_with_llm(
@@ -1448,13 +1643,15 @@ class StoreRetriever:
         ):
             try:
                 llm_json = self._call_evaluation_llm_json(full_messages, phase="evaluation_single")
-                return self._normalize_eval_decision(
+                decision = self._normalize_eval_decision(
                     llm_json=llm_json,
                     evidences=evidences,
                     matched_strong=matched_strong,
                     matched_weak=matched_weak,
                     matched_false_pos=matched_false_pos,
                 )
+                decision["decision_policy"] = "llm"
+                return decision
             except Exception as exc:  # noqa: BLE001
                 can_split = bool(self.cfg.evaluation.llm_auto_split_enabled and len(evidences) > 1)
                 if not is_oom_error(exc) or not can_split:
@@ -1529,6 +1726,7 @@ class StoreRetriever:
                         matched_weak=batch_matched_weak,
                         matched_false_pos=batch_matched_false,
                     )
+                    decision["decision_policy"] = "llm"
                     decisions.append(decision)
 
                 if len(decisions) == 1:
@@ -1577,13 +1775,15 @@ class StoreRetriever:
 
                 try:
                     synth_json = self._call_evaluation_llm_json(synth_messages, phase="evaluation_synthesis")
-                    return self._normalize_eval_decision(
+                    decision = self._normalize_eval_decision(
                         llm_json=synth_json,
                         evidences=evidences,
                         matched_strong=matched_strong,
                         matched_weak=matched_weak,
                         matched_false_pos=matched_false_pos,
                     )
+                    decision["decision_policy"] = "llm"
+                    return decision
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Evaluation synthesis failed; using deterministic fallback: rule_id=%s error=%s", rule_id, exc)
                     return self._deterministic_eval_fallback(
@@ -1761,6 +1961,7 @@ class StoreRetriever:
             rule_id = str(rule.get("id", "")).strip()
             preferred_limits = self._evaluation_preferred_limits(rule_id)
             base_limits = self._evaluation_base_limits()
+            eval_result_cap = max(1, int(self.cfg.evaluation.retrieval_result_cap_per_query))
             queries = [
                 f"{rule.get('title', '')}\n{rule.get('definition', '')}".strip(),
                 " ".join(rule.get("strong_signals", [])),
@@ -1769,71 +1970,83 @@ class StoreRetriever:
 
             candidate_map: Dict[str, Dict[str, Any]] = {}
             retrieval_failures: List[str] = []
+
+            def _retrieve_sources_for_limits(query_text: str, limits: Dict[str, int], label: str, intent_suffix: str) -> None:
+                if not query_text.strip() or not limits:
+                    return
+                try:
+                    sources, _ = self.retrieve(
+                        query_text,
+                        [clean_repo_name],
+                        collection_limits=limits,
+                        intent_override=f"evaluation_{rule_id}_{intent_suffix}",
+                        result_cap=eval_result_cap,
+                    )
+                    self._merge_evaluation_candidates(candidate_map, sources)
+                except Exception as exc:  # noqa: BLE001
+                    retrieval_failures.append(f"{label}:{exc}")
+
             for query in queries:
                 if not query.strip():
                     continue
-                sources: List[Dict[str, Any]] = []
                 if preferred_limits:
-                    try:
-                        preferred_sources, _ = self.retrieve(
-                            query,
-                            [clean_repo_name],
-                            collection_limits=preferred_limits,
-                            intent_override=f"evaluation_{rule_id}_preferred",
-                        )
-                        sources.extend(preferred_sources)
-                    except Exception as exc:  # noqa: BLE001
-                        retrieval_failures.append(f"preferred:{exc}")
+                    _retrieve_sources_for_limits(query, preferred_limits, "preferred", "preferred")
+                _retrieve_sources_for_limits(query, base_limits, "base", "base")
 
-                try:
-                    base_sources, _ = self.retrieve(
-                        query,
-                        [clean_repo_name],
-                        collection_limits=base_limits,
-                        intent_override=f"evaluation_{rule_id}_base",
-                    )
-                    sources.extend(base_sources)
-                except Exception as exc:  # noqa: BLE001
-                    retrieval_failures.append(f"base:{exc}")
-                    continue
+            top_candidates = self._score_evaluation_candidates(candidate_map=candidate_map, rule=rule)
+            pre_second_pass_count = len(top_candidates)
+            pre_second_pass_strong, pre_second_pass_weak = self._candidate_signal_hits(
+                rule=rule,
+                candidates=top_candidates,
+            )
 
-                for src in sources:
-                    meta = src.get("metadata") or {}
-                    key = "|".join(
-                        [
-                            str(meta.get("file_path", "")),
-                            str(meta.get("start_line", "")),
-                            str(meta.get("end_line", "")),
-                            str(meta.get("node_type", "")),
-                        ]
-                    )
-                    if not key.strip("|"):
-                        continue
-                    existing = candidate_map.get(key)
-                    if existing is None or float(src.get("distance", 1e9)) < float(existing.get("distance", 1e9)):
-                        candidate_map[key] = src
-
-            scored_candidates: List[Tuple[float, Dict[str, Any]]] = []
-            for src in candidate_map.values():
-                meta = src.get("metadata") or {}
-                base_text = "\n".join(
-                    [
-                        str(meta.get("file_path", "")),
-                        str(meta.get("symbol", "")),
-                        str(meta.get("node_type", "")),
-                        str(src.get("document", "")),
-                    ]
+            if self._should_run_second_pass(
+                candidate_count=pre_second_pass_count,
+                matched_strong=pre_second_pass_strong,
+                matched_weak=pre_second_pass_weak,
+            ):
+                min_candidates = max(1, int(self.cfg.evaluation.retrieval_second_pass_min_candidates))
+                logger.info(
+                    (
+                        "Evaluation second pass triggered: rule_id=%s candidates=%d strong_hits=%d "
+                        "weak_hits=%d min_candidates=%d"
+                    ),
+                    rule_id,
+                    pre_second_pass_count,
+                    len(pre_second_pass_strong),
+                    len(pre_second_pass_weak),
+                    min_candidates,
                 )
-                strong_hits = self._match_signals(rule.get("strong_signals", []), base_text)
-                weak_hits = self._match_signals(rule.get("weak_signals", []), base_text)
-                overlap_score = (len(strong_hits) * 2.0) + len(weak_hits)
-                distance = float(src.get("distance", 1e9))
-                score = overlap_score - distance
-                scored_candidates.append((score, src))
+                expanded_query = "\n".join(
+                    [
+                        str(rule.get("title", "")),
+                        str(rule.get("definition", "")),
+                        " ".join(rule.get("strong_signals", [])),
+                        " ".join(rule.get("weak_signals", [])),
+                    ]
+                ).strip()
+                second_pass_limits = self._evaluation_second_pass_limits()
+                if expanded_query and second_pass_limits:
+                    before_second_pass_total = len(candidate_map)
+                    _retrieve_sources_for_limits(
+                        expanded_query,
+                        second_pass_limits,
+                        "second_pass",
+                        "second_pass",
+                    )
+                    top_candidates = self._score_evaluation_candidates(candidate_map=candidate_map, rule=rule)
+                    logger.info(
+                        (
+                            "Evaluation second pass completed: rule_id=%s pre_candidates=%d "
+                            "candidate_pool_before=%d candidate_pool_after=%d post_candidates=%d"
+                        ),
+                        rule_id,
+                        pre_second_pass_count,
+                        before_second_pass_total,
+                        len(candidate_map),
+                        len(top_candidates),
+                    )
 
-            scored_candidates.sort(key=lambda item: item[0], reverse=True)
-            max_candidates = max(1, self.cfg.evaluation.max_candidates_per_item)
-            top_candidates = [src for _, src in scored_candidates[:max_candidates]]
             total_candidates += len(top_candidates)
 
             evidences: List[Dict[str, Any]] = []
@@ -1894,8 +2107,16 @@ class StoreRetriever:
                     "matched_strong_signals": matched_strong,
                     "matched_weak_signals": matched_weak,
                     "false_positive_risks": matched_false_pos,
+                    "decision_policy": "deterministic_fallback",
                 }
 
+            decision = self._apply_recall_bias(
+                rule_id=rule_id or "unknown",
+                decision=decision,
+                matched_strong=matched_strong,
+                matched_weak=matched_weak,
+                matched_false_pos=matched_false_pos,
+            )
             status = self._normalize_eval_status(decision.get("status"))
             if status == "Detected":
                 status_counts["detected"] += 1
@@ -1904,6 +2125,11 @@ class StoreRetriever:
             else:
                 status_counts["needs_review"] += 1
 
+            deterministic_signal_counts = {
+                "strong": len(matched_strong),
+                "weak": len(matched_weak),
+                "false_positive": len(matched_false_pos),
+            }
             items_out.append({
                 "id": str(rule.get("id", "")),
                 "title": str(rule.get("title", "")),
@@ -1917,6 +2143,8 @@ class StoreRetriever:
                 "evidences": evidences,
                 "candidate_count": len(top_candidates),
                 "retrieval_failures": retrieval_failures,
+                "decision_policy": str(decision.get("decision_policy", "llm") or "llm"),
+                "deterministic_signal_counts": deterministic_signal_counts,
             })
 
         generated_at = self._utc_now()
@@ -2071,6 +2299,7 @@ class StoreRetriever:
         store_names: List[str],
         collection_limits: Optional[Dict[str, int]] = None,
         intent_override: str = "",
+        result_cap: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], str]:
         normalized_stores = self._normalize_store_names(store_names)
         if not normalized_stores:
@@ -2267,7 +2496,13 @@ class StoreRetriever:
             debug_collections[collection_key] = debug_entry
 
         ranked.sort(key=lambda item: item["distance"])
-        cap = max(1, self.cfg.chat.max_context_chunks)
+        if result_cap is None:
+            cap = max(1, int(self.cfg.chat.max_context_chunks))
+        else:
+            try:
+                cap = max(1, int(result_cap))
+            except (TypeError, ValueError):
+                cap = max(1, int(self.cfg.chat.max_context_chunks))
         out = ranked[:cap]
         self._last_retrieve_debug = {
             "query": query,
@@ -2277,7 +2512,8 @@ class StoreRetriever:
             "collections": debug_collections,
             "candidates": len(ranked),
             "returned": len(out),
-            "max_context_chunks": cap,
+            "max_context_chunks": int(self.cfg.chat.max_context_chunks),
+            "result_cap": cap,
         }
         logger.info(
             "Store retrieval completed: intent=%s candidates=%d returned=%d",

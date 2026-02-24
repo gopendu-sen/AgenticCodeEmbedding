@@ -170,6 +170,12 @@ export interface EvaluationReportItem {
   matched_weak_signals: string[];
   false_positive_risks: string[];
   evidences: EvaluationEvidence[];
+  decision_policy?: "llm" | "deterministic_fallback" | "recall_override_strong" | "recall_override_weak";
+  deterministic_signal_counts?: {
+    strong: number;
+    weak: number;
+    false_positive: number;
+  };
 }
 
 export interface EvaluationReportSummary {

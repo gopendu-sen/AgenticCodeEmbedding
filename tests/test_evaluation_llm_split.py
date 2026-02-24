@@ -11,6 +11,14 @@ def _build_retriever() -> StoreRetriever:
     retriever.llm = SimpleNamespace(timeout_s=60)
     retriever.cfg = SimpleNamespace(
         evaluation=SimpleNamespace(
+            recall_bias_enabled=True,
+            force_detect_min_strong_hits=1,
+            weak_hits_min_for_review=1,
+            ignore_false_positive_for_downgrade=True,
+            retrieval_result_cap_per_query=20,
+            retrieval_second_pass_enabled=True,
+            retrieval_second_pass_min_candidates=8,
+            retrieval_second_pass_multiplier=2.0,
             llm_auto_split_enabled=True,
             llm_soft_input_tokens=120,
             llm_target_input_tokens=80,
@@ -138,3 +146,36 @@ def test_evaluation_oom_retry_recovers():
     )
     assert state["count"] > 1
     assert decision["status"] in {"Detected", "Not Detected", "Needs Review"}
+
+
+def test_split_decision_can_be_upgraded_by_recall_bias():
+    retriever = _build_retriever()
+
+    def fake_call(self, messages, *, phase, split_batch_idx=None, split_batch_total=None):
+        return {
+            "status": "Not Detected",
+            "reason": "batch thinks absent",
+            "confidence": 0.3,
+            "evidence_ids": [1],
+            "matched_strong_signals": [],
+            "matched_weak_signals": [],
+            "false_positive_risks": [],
+        }
+
+    retriever._call_evaluation_llm_json = MethodType(fake_call, retriever)  # type: ignore[attr-defined]
+    decision = retriever._evaluate_rule_with_llm(
+        rule=_rule(),
+        evidences=_evidences(),
+        matched_strong=["auth"],
+        matched_weak=["guard"],
+        matched_false_pos=[],
+    )
+    adjusted = retriever._apply_recall_bias(
+        rule_id="R1",
+        decision=decision,
+        matched_strong=["auth"],
+        matched_weak=["guard"],
+        matched_false_pos=[],
+    )
+    assert adjusted["status"] == "Detected"
+    assert adjusted["decision_policy"] == "recall_override_strong"

@@ -246,12 +246,15 @@ For each rule:
    - joined strong signals
    - joined weak signals
 2. Query preferred audit dimensions first (rule-id mapping), then base dimensions fallback.
-3. Deduplicate candidates by `(file_path,start_line,end_line,node_type)`.
-4. Score candidates using:
+3. Cap each retrieval call with `evaluation.retrieval_result_cap_per_query` (independent from chat cap).
+4. Deduplicate candidates by `(file_path,start_line,end_line,node_type)`.
+5. Score candidates using:
    - strong-signal hit count
    - weak-signal hit count
    - vector distance
-5. Keep top-N candidates and extract bounded evidence snippets.
+6. Keep top-N candidates and extract bounded evidence snippets.
+7. If first pass is weak (`candidate_count < evaluation.retrieval_second_pass_min_candidates` or no strong/weak hits),
+   run a second broad pass with boosted budgets (`evaluation.retrieval_second_pass_multiplier`) across base + audit collections.
 
 ### Decisioning
 - Signal hits are recomputed on selected evidences.
@@ -259,13 +262,19 @@ For each rule:
   - `Detected`
   - `Not Detected`
   - `Needs Review`
-- If LLM decision fails, item is marked `Needs Review` with failure reason (partial run).
+- If LLM decision fails, deterministic fallback is used.
+- Recall-bias policy is configurable and enabled by default:
+  - strong hits `>= evaluation.force_detect_min_strong_hits` force `Detected`
+  - weak-only hits `>= evaluation.weak_hits_min_for_review` prevent `Not Detected` and force `Needs Review`
+  - false-positive matches can reduce confidence/reasoning context but do not downgrade a recall-forced `Detected`
 
 ### Outputs
 - Per-rule output includes:
   - status, reason, confidence
   - matched strong/weak/false-positive signal lists
   - evidence snippets with citation ids
+  - optional decision policy metadata (`decision_policy`)
+  - optional deterministic signal counts (`deterministic_signal_counts`)
 - Job-level outputs include:
   - summary status counts
   - total candidates
@@ -375,6 +384,15 @@ Embedding text payload is enriched with selected metadata when present:
   - `config.embedding.yml` (ops service)
 - Env overrides: `AGENTIC_RAG__...` keys only
 - Relative `paths.*`, `chat.memory.sqlite_path`, and `evaluation.*` path fields resolve relative to config file directory
+- Evaluation recall-first knobs:
+  - `evaluation.recall_bias_enabled`
+  - `evaluation.force_detect_min_strong_hits`
+  - `evaluation.weak_hits_min_for_review`
+  - `evaluation.ignore_false_positive_for_downgrade`
+  - `evaluation.retrieval_result_cap_per_query`
+  - `evaluation.retrieval_second_pass_enabled`
+  - `evaluation.retrieval_second_pass_min_candidates`
+  - `evaluation.retrieval_second_pass_multiplier`
 
 ## Migration Notes
 - Streamlit was removed from runtime.
